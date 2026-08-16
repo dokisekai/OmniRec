@@ -982,10 +982,10 @@ ws://localhost:8000/ws/progress`,
                 background: 'linear-gradient(135deg, #6366f1 0%, #ec4899 100%)',
                 WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent'
               }}>
-                Antigravity 多模态推荐与检索系统
+                OmniRec · 多模态推荐与检索系统
               </div>
               <div style={{ fontSize: '0.72rem', color: '#9ca3af' }}>
-                Qwen3-VL-8B + Qwen3-VL-Embedding + Whisper + CLAP
+                Qwen3-VL-8B + Qwen3-VL-Embedding + Whisper + CLAP + Qdrant
               </div>
             </div>
           </div>

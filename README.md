@@ -1,6 +1,7 @@
-# Antigravity 多模态推荐与检索系统 (Multimodal Recommender)
+# OmniRec · 多模态智能推荐与检索系统
 
-> 🚀 本地全量私有化部署 · Apple Silicon (Metal GPU) 优化 · 六大模型矩阵 · 零云端依赖与数据防泄露
+> 🚀 **OmniRec** — Next-Gen On-Device Multimodal AI Recommender Engine for Video Platforms.
+> 本地全量私有化部署 · Apple Silicon (Metal GPU) 优化 · 六大模型矩阵 · 零云端依赖与数据防泄露
 
 ---
 
