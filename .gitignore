@@ -27,10 +27,29 @@ venv/
 ENV/
 env/
 
-# Model Weights (Download separately or via scripts)
+# Model Weights (17GB+ Large binaries, local-only)
 backend/models/*
 !backend/models/.gitkeep
 !backend/models/README.md
+
+# Local Private Media Files (STRICTLY PROHIBITED FROM CLOUD/GIT)
+test_files/*
+!test_files/.gitkeep
+!test_files/README.md
+*.MOV
+*.mov
+*.mp4
+*.m4v
+*.avi
+*.mkv
+*.jpeg
+*.jpg
+*.png
+*.webp
+*.wav
+*.mp3
+*.flac
+*.aac
 
 # Qdrant Database & Binaries
 backend/bin/
