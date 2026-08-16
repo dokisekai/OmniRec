@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Model Weights (Download separately or via scripts)
+backend/models/*
+!backend/models/.gitkeep
+!backend/models/README.md
+
+# Qdrant Database & Binaries
+backend/bin/
+backend/data/
+backend/snapshots/
+.qdrant-initialized
+
+# Caches & Runtime Uploads
+backend/cache/
+vlm_cache/
+*.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+.trae-html-share-packages/
+
+# OS and Editors
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

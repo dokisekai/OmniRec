@@ -1,0 +1,13 @@
+storage:
+  # 数据持久化目录（相对于 backend/）
+  storage_path: ./data/qdrant
+
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+  # 最大并发连接数
+  max_request_size_mb: 32
+
+# 日志级别
+log_level: INFO

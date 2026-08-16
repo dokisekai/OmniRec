@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 — 向量数据库与推荐引擎</title>
+<link rel="stylesheet" href="_shared/css/style.css">
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="nav-inner">
+    <a href="00-系统总览设计.html" class="nav-brand">多模态推荐系统</a>
+    <div class="nav-links">
+      <a href="00-系统总览设计.html">00 总览</a>
+      <a href="01-模型选型与内存管理.html">01 模型</a>
+      <a href="02-数据索引管线.html">02 索引</a>
+      <a href="03-向量数据库与推荐引擎.html" class="active">03 检索</a>
+      <a href="04-API设计与工程附录.html">04 附录</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+
+<div class="cover">
+  <h1>向量数据库与推荐引擎</h1>
+  <div class="subtitle">03 — Qdrant Schema · MRL · RRF 融合 · Reranker 精排 · LLM 推荐 · Item-to-Item · 缓存策略</div>
+</div>
+
+<div class="toc">
+  <h3>本文档结构</h3>
+  <ol>
+    <li><a href="#s1">向量数据库选型</a></li>
+    <li><a href="#s2">Collection Schema</a></li>
+    <li><a href="#s3">向量维度与去重</a></li>
+    <li><a href="#s4">推荐引擎流程</a></li>
+    <li><a href="#s4b">基于内容推荐 (Item-to-Item)</a></li>
+    <li><a href="#s5">精排策略</a></li>
+    <li><a href="#s6">向量融合策略</a></li>
+    <li><a href="#s7">多级缓存架构</a></li>
+  </ol>
+</div>
+
+<!-- 1. 向量数据库选型 -->
+<h2 id="s1"><span class="num">01</span>向量数据库选型：Qdrant</h2>
+<div class="grid-3">
+  <div class="stat"><div class="num">4.55ms</div><div class="label">检索延时</div></div>
+  <div class="stat cyan"><div class="num">2000+</div><div class="label">QPS</div></div>
+  <div class="stat green"><div class="num">Rust</div><div class="label">内存高效</div></div>
+</div>
+
+<p>Qdrant 在单机部署中性能远超 Chroma（1.5s）和 Milvus（300ms），且 Rust 实现内存占用极低，完美适配 24GB 环境。</p>
+
+<!-- 2. Collection Schema -->
+<h2 id="s2"><span class="num">02</span>Collection Schema</h2>
+<pre><code># Qdrant Collection 设计
+
+Collection: media_items
+├── 向量字段
+│   ├── content_vector      # 主向量 (2048维, MRL可降至512)
+│   │                        # 图片: VL-Embedding 直接编码
+│   │                        # 音频(语音): 文本 Embedding
+│   │                        # 音频(音乐): CLAP 音频向量 (512维, 映射到主空间)
+│   │                        # 视频(画面): VLM 描述文本 Embedding
+│   │                        # 视频(画面+声音): 画面向量 (可融合音频向量)
+│   ├── thumbnail_vector     # 缩略图向量 (2048维, 可选)
+│   │                        # 视频首帧 / 图片原图
+│   └── audio_vector         # CLAP 音频向量 (512维, 音频+视频条目)
+│                            # 音频: 音乐/环境音的直接嵌入
+│                            # 视频: 音轨的 CLAP/ASR 嵌入 (画面+声音模式)
+│
+├── Payload 元数据
+│   ├── id                   # UUID
+│   ├── media_type           # "image" | "video" | "audio"
+│   ├── video_mode           # "visual" | "audio" | "both" (仅视频)
+│   ├── file_path            # 原始文件路径
+│   ├── file_hash            # MD5 去重
+│   ├── file_size            # 文件大小
+│   ├── duration             # 时长 (视频/音频)
+│   ├── resolution           # 分辨率 (图片/视频)
+│   │
+│   ├── description          # VLM 生成的富文本描述 / LLM 摘要
+│   ├── transcript           # ASR 转写文本 (音频/视频)
+│   ├── summary              # LLM 生成的内容摘要
+│   ├── audio_type           # "speech" | "music" | "ambient" | "mixed" (音频)
+│   │
+│   ├── tags_category        # 一级标签: ["美食","风景","人物"]
+│   ├── tags_style           # 风格标签: ["ins风","夜景","暖色调"]
+│   ├── tags_emotion         # 情绪标签: ["温馨","活力","宁静"]
+│   ├── tags_scene           # 场景标签: ["室内","户外","车内"]
+│   ├── tags_objects         # 物体标签: ["汽车","手机","花卉"]
+│   ├── tags_audio           # 音频标签: ["钢琴","古典","咖啡馆环境音"]
+│   │
+│   ├── color_palette        # 主色调列表
+│   ├── created_at           # 入库时间
+│   └── updated_at           # 更新时间
+│
+└── 索引配置
+    ├── HNSW
+    │   ├── m: 16            # 连接数
+    │   ├── ef_construct: 64 # 构建精度
+    │   └── ef_search: 128   # 检索精度 (可调)
+    └── 量化
+        └── scalar: int8     # 标量量化减少内存</code></pre>
+
+<!-- 3. 向量维度与去重 -->
+<h2 id="s3"><span class="num">03</span>向量维度与去重</h2>
+
+<div class="card card-accent">
+<p>Qwen3-VL-Embedding-2B 支持 <strong>Matryoshka Representation Learning (MRL)</strong>，输出维度可从 64 到 2048 灵活配置。推荐方案：</p>
+<ul>
+  <li><strong>入库向量</strong>：2048 维（最高精度，确保召回质量）</li>
+  <li><strong>检索向量</strong>：512 维（通过 MRL 截断，速度提升 4 倍，召回率仅降 ~3%）</li>
+  <li><strong>快速初筛</strong>：128 维（Top-K 粗筛，再用 2048 维精排）</li>
+</ul>
+</div>
+
+<h3>去重策略</h3>
+<p>入库前计算文件 MD5 哈希，查询 Qdrant payload 中的 <code>file_hash</code> 字段。已存在的文件跳过重新索引，仅更新元数据。</p>
+
+<!-- 4. 推荐引擎流程 -->
+<h2 id="s4"><span class="num">04</span>推荐引擎流程</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+    Q[用户查询] --> PT{查询类型}
+    PT -->|文字| TE[文本 Embedding]
+    PT -->|图片| VE[VL-Embedding 直接编码]
+    PT -->|音频-语音| ASR2[ASR 转写] --> TE
+    PT -->|音频-音乐| CLAP2[CLAP 音频编码] --> VE2[CLAP 向量检索]
+    PT -->|视频| FF2[抽帧] --> VLM2[VLM 描述] --> TE
+
+    TE --> VS[Qdrant 向量检索<br>Top-K=100]
+    VE --> VS
+    VE2 --> VS
+
+    VS --> F{标签过滤?}
+    F -->|是| TF[标签条件过滤]
+    F -->|否| CAND[候选集 100 条]
+
+    TF --> CAND
+
+    CAND --> RR2[Reranker 精排<br>Qwen3-VL-Reranker-2B<br>Top-100 → Top-20]
+    RR2 --> LLM2[LLM 重排 + 生成推荐理由<br>bonsai-8b-mlx<br>Top-20 → Top-10]
+    LLM2 --> OUT[最终推荐结果<br>Top-10 + 推荐理由]
+</pre>
+  <figcaption>图 1：推荐引擎完整流程（查询驱动）</figcaption>
+</div>
+
+<!-- 4b. 基于内容推荐 (Item-to-Item) -->
+<h2 id="s4b"><span class="num">04b</span>基于内容推荐 (Item-to-Item)</h2>
+
+<p>上节描述的是<strong>查询驱动</strong>的搜索流程（用户输入文字/图片/音频 → 向量检索）。本节描述<strong>内容驱动</strong>的推荐流程：用户已索引一个视频，第二次请求时基于该视频找相似内容。两种模式对比如下：</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>维度</th><th>查询驱动搜索</th><th>内容驱动推荐 (Item-to-Item)</th></tr>
+</thead>
+<tbody>
+<tr><td>触发方式</td><td>用户输入文字/图片/音频</td><td>客户端传已索引条目的 <code>item_id</code></td></tr>
+<tr><td>查询向量来源</td><td>实时计算（Embedding/VLM/CLAP）</td><td>从 Qdrant 取回已存储的向量</td></tr>
+<tr><td>计算开销</td><td>需要跑模型生成向量</td><td><strong>零重复计算</strong>，直接取回</td></tr>
+<tr><td>延时</td><td>3-8s（含向量化）</td><td>2-5s（省去向量化步骤）</td></tr>
+<tr><td>适用场景</td><td>主动搜索</td><td>"看了这个还看了"、相似内容推荐</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>核心设计原则：向量不离开服务端</h3>
+<div class="card card-accent">
+  <p>客户端<strong>不需要也不应该</strong>接触原始向量。推荐流程如下：</p>
+  <ul>
+    <li><strong>索引阶段</strong>：文件经 VLM/ASR/CLAP 处理后，向量存入 Qdrant，客户端获得 <code>item_id</code></li>
+    <li><strong>推荐阶段</strong>：客户端仅发送 <code>item_id</code>，服务端从 Qdrant 取回向量 → 检索 → 精排 → 返回结果</li>
+    <li><strong>标签的角色</strong>：作为可选过滤条件（如"只推荐同类型视频"），不参与向量计算</li>
+    <li><strong>MD5 的角色</strong>：用于缓存键和去重，不用于推荐检索</li>
+  </ul>
+</div>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+    subgraph P1["阶段一：索引入库"]
+        V[用户上传视频] --> PIPE[索引管线<br>VLM · ASR · CLAP · Embedding]
+        PIPE --> QD[(Qdrant 存储<br>content_vector + audio_vector<br>+ tags + MD5)]
+    end
+
+    QD -.->|"复用已存储向量"| RET
+
+    subgraph P2["阶段二：基于内容推荐"]
+        C[客户端请求<br>POST { item_id }] -->|"仅传 ID"| SRV[服务端取回向量<br>+ 标签过滤]
+        SRV --> RET[向量检索 Top-100<br>排除自身]
+        RET --> RR[Reranker 精排<br>Top-100 → Top-20]
+        RR --> MMR[MMR 多样性重排<br>Top-20 → Top-10]
+        MMR --> LLM[LLM 生成推荐理由]
+        LLM --> OUT[推荐结果<br>Top-10 + 推荐理由]
+    end
+
+    style SRV fill:#8B5CF6,color:#fff
+    style QD fill:#06B6D4,color:#000
+</pre>
+  <figcaption>图 2：Item-to-Item 推荐流程（两阶段：索引 → 复用向量推荐）</figcaption>
+</div>
+
+<h3>ItemRecommender 实现</h3>
+<pre><code>class ItemRecommender:
+    """基于已索引内容的推荐引擎 — 向量复用，零重复计算"""
+
+    async def recommend_by_item(
+        self,
+        item_id: str,
+        top_n: int = 10,
+        filters: dict = None,
+        mmr_lambda: float = 0.5,
+    ) -> dict:
+        # ① 从 Qdrant 取回该条目的存储向量（无需重新处理文件）
+        source = await qdrant.retrieve(
+            collection="media_items",
+            ids=[item_id],
+            with_vectors=True,    # 取回向量
+            with_payload=True,    # 取回标签/描述
+        )
+
+        if not source:
+            raise NotFoundError(f"item_id {item_id} 不存在")
+
+        source_vectors = source[0].vector
+        source_payload = source[0].payload
+
+        # ② 用取回的向量搜索相似内容（排除自身）
+        search_results = []
+
+        # 主向量检索（画面/文本）
+        if "content_vector" in source_vectors:
+            visual_hits = await qdrant.search(
+                collection="media_items",
+                query_vector=source_vectors["content_vector"],
+                query_filter=build_filter(filters, exclude_id=item_id),
+                limit=100,
+                with_payload=True,
+            )
+            search_results.append(visual_hits)
+
+        # 音频向量检索（如果源条目有音频向量）
+        if "audio_vector" in source_vectors:
+            audio_hits = await qdrant.search(
+                collection="media_items",
+                query_vector=source_vectors["audio_vector"],
+                query_filter=build_filter(filters, exclude_id=item_id),
+                limit=100,
+                with_payload=True,
+            )
+            search_results.append(audio_hits)
+
+        # ③ RRF 融合多路检索结果
+        if len(search_results) > 1:
+            candidates = reciprocal_rank_fusion(
+                search_results,
+                weights=[0.7, 0.3],  # 画面 0.7, 声音 0.3
+            )
+        else:
+            candidates = search_results[0]
+
+        # ④ Reranker 精排
+        source_desc = source_payload.get("description", "")
+        reranked = await reranker.rerank(
+            query_text=source_desc,
+            candidates=candidates[:20],
+            top_k=top_n,
+        )
+
+        # ⑤ MMR 多样性重排
+        mmr_ids = maximal_marginal_relevance(
+            query_vector=source_vectors["content_vector"],
+            candidate_vectors=[c["vector"] for c in reranked],
+            candidate_ids=[c["item_id"] for c in reranked],
+            lambda_param=mmr_lambda,
+            k=top_n,
+        )
+
+        # ⑥ LLM 生成推荐理由
+        final = [c for c in reranked if c["item_id"] in mmr_ids]
+        explained = await llm_explainer.explain(
+            source=source_payload,
+            candidates=final,
+        )
+
+        return {
+            "source_item": {
+                "item_id": item_id,
+                "description": source_desc,
+                "tags": extract_tags(source_payload),
+            },
+            "recommendations": explained,
+        }
+
+
+def build_filter(
+    filters: dict = None, exclude_id: str = None
+) -> dict:
+    """构建 Qdrant 过滤条件：标签过滤 + 排除自身"""
+    conditions = []
+
+    # 排除源条目自身
+    if exclude_id:
+        conditions.append({
+            "key": "id",
+            "match": {"except": exclude_id},
+        })
+
+    # 标签过滤（可选）
+    if filters:
+        for tag_field, values in filters.items():
+            if values:
+                conditions.append({
+                    "key": tag_field,
+                    "match": {"any": values},
+                })
+
+    return {"must": conditions} if conditions else None</code></pre>
+
+<div class="card card-accent">
+  <h4>Item-to-Item 推荐的关键优势</h4>
+  <ul>
+    <li><strong>零重复计算</strong>：向量在索引时已存入 Qdrant，推荐时直接取回使用，不重新跑 VLM/ASR/CLAP</li>
+    <li><strong>API 简洁</strong>：客户端只需传 <code>item_id</code>，不需要理解向量、维度等内部细节</li>
+    <li><strong>支持双向量</strong>：如果源是视频（画面+声音），两路向量都参与检索并 RRF 融合</li>
+    <li><strong>标签是加分项</strong>：可作为过滤条件缩小候选池（如"只推荐同类型视频"），但不参与向量计算</li>
+    <li><strong>延时更低</strong>：省去向量化步骤，比查询驱动搜索快 1-3s</li>
+  </ul>
+</div>
+
+<!-- 5. 精排策略 -->
+<h2 id="s5"><span class="num">05</span>精排策略</h2>
+<div class="grid-2">
+  <div class="card card-accent">
+    <h4>阶段 1：Reranker 精排</h4>
+    <p><strong>模型</strong>：Qwen3-VL-Reranker-2B</p>
+    <p><strong>输入</strong>：(query, candidate) 对</p>
+    <p><strong>输出</strong>：相关性分数 0-1</p>
+    <p><strong>处理</strong>：100 条候选 → 逐对打分 → 取 Top-20</p>
+    <p><strong>延时</strong>：~2-3s（100 对）</p>
+  </div>
+  <div class="card" style="border-left: 3px solid var(--accent3);">
+    <h4>阶段 2：LLM 重排 + 解释</h4>
+    <p><strong>模型</strong>：bonsai-8b-mlx</p>
+    <p><strong>输入</strong>：Top-20 候选 + 查询描述</p>
+    <p><strong>输出</strong>：Top-10 + 每条推荐理由</p>
+    <p><strong>策略</strong>：多样性感知 + 去重 + 新鲜度</p>
+    <p><strong>延时</strong>：~3-5s</p>
+  </div>
+</div>
+
+<h3>推荐解释生成</h3>
+<pre><code># LLM 推荐理由生成 Prompt
+
+用户查询：{query_description}
+
+候选内容列表：
+1. {item_1_description} (标签: {tags_1})
+2. {item_2_description} (标签: {tags_2})
+...
+
+请从候选中选出最相关的 10 条，并为每条生成推荐理由。
+输出 JSON 格式：
+
+{
+  "recommendations": [
+    {
+      "item_id": "...",
+      "rank": 1,
+      "relevance_score": 0.95,
+      "reason": "推荐理由：与查询在XX方面高度匹配...",
+      "match_tags": ["匹配的关键标签"]
+    }
+  ]
+}</code></pre>
+
+<!-- 6. 向量融合策略 -->
+<h2 id="s6"><span class="num">06</span>向量融合策略</h2>
+<p>视频"画面+声音"模式会产生两组向量（content_vector + audio_vector），需要策略来融合检索结果。</p>
+
+<h3>方案对比</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>方案</th><th>原理</th><th>优点</th><th>缺点</th><th>适用场景</th></tr>
+</thead>
+<tbody>
+<tr><td>双向量独立检索</td><td>分别在两个向量空间检索，结果取并集</td><td>精度高，各模态独立排序</td><td>需要合并逻辑</td><td>跨模态搜索</td></tr>
+<tr><td>加权平均融合</td><td>score = α × 画面相似度 + (1-α) × 音频相似度</td><td>简单，一个分数</td><td>需要调参 α</td><td>综合推荐</td></tr>
+<tr><td>RRF (Reciprocal Rank Fusion)</td><td>score = Σ 1/(k + rank_i)，k=60</td><td>无需归一化，抗尺度差异</td><td>忽略分数绝对值</td><td>多路召回融合（推荐）</td></tr>
+<tr><td>投影到统一空间</td><td>训练线性映射将 CLAP 向量投影到文本嵌入空间</td><td>真正统一空间</td><td>需要训练数据</td><td>长期方案</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>系统默认方案：RRF + 加权融合</h3>
+<pre><code>def reciprocal_rank_fusion(
+    results: list[list[dict]],
+    weights: list[float] = None,
+    k: int = 60,
+) -> list[dict]:
+    """
+    RRF 融合多路检索结果
+    results: 各路的检索结果列表，每个结果包含 item_id 和 score
+    weights: 各路权重（可选），默认等权
+    k: RRF 常数（标准值 60）
+    """
+    if weights is None:
+        weights = [1.0] * len(results)
+
+    scores = {}
+    for result_list, weight in zip(results, weights):
+        for rank, item in enumerate(result_list):
+            item_id = item["item_id"]
+            rrf_score = weight / (k + rank + 1)
+            scores[item_id] = scores.get(item_id, 0) + rrf_score
+
+    # 按融合分数排序
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+    return [{"item_id": id, "score": s} for id, s in ranked]
+
+
+# 视频画面+声音检索示例
+visual_results = qdrant.search(content_vector, limit=100)   # 画面路
+audio_results = qdrant.search(audio_vector, limit=100)      # 声音路
+
+# RRF 融合（画面权重 0.7，声音权重 0.3 — 可配置）
+fused = reciprocal_rank_fusion(
+    [visual_results, audio_results],
+    weights=[0.7, 0.3],
+)</code></pre>
+
+<div class="card card-accent">
+  <h4>融合策略选择规则</h4>
+  <ul>
+    <li><strong>查询和被查都是同模态</strong>：单路检索，无需融合</li>
+    <li><strong>视频条目有双向量</strong>：查画面向量 → 画面路；查音频向量 → 声音路；查文本 → 两路都查 + RRF 融合</li>
+    <li><strong>跨模态搜索（以音搜视频）</strong>：声音路为主（权重 0.8），画面路为辅（权重 0.2）</li>
+    <li><strong>通用推荐</strong>：两路等权 RRF 融合</li>
+    <li><strong>权重可配置</strong>：通过 <code>config.yaml</code> 的 <code>fusion_weights</code> 调整</li>
+  </ul>
+</div>
+
+<!-- 7. 多级缓存架构 -->
+<h2 id="s7"><span class="num">07</span>多级缓存架构</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>层级</th><th>缓存对象</th><th>存储</th><th>TTL</th><th>容量</th><th>失效策略</th></tr>
+</thead>
+<tbody>
+<tr><td>L1 内存缓存</td><td>Embedding 向量（查询文本→向量）</td><td>LRU Dict</td><td>1 小时</td><td>10000 条</td><td>LRU 驱逐</td></tr>
+<tr><td>L1 内存缓存</td><td>Qdrant 检索结果（相同向量+过滤条件）</td><td>LRU Dict</td><td>5 分钟</td><td>1000 条</td><td>LRU 驱逐</td></tr>
+<tr><td>L2 磁盘缓存</td><td>VLM 描述 + 标签（文件 MD5 → 结果）</td><td>diskcache</td><td>永久</td><td>10 GB</td><td>文件不变则永久有效</td></tr>
+<tr><td>L2 磁盘缓存</td><td>ASR 转写文本（音频 MD5 → 文本）</td><td>diskcache</td><td>永久</td><td>5 GB</td><td>文件不变则永久有效</td></tr>
+<tr><td>L2 磁盘缓存</td><td>CLAP 音频向量（音频 MD5 → 向量）</td><td>diskcache</td><td>永久</td><td>2 GB</td><td>文件不变则永久有效</td></tr>
+<tr><td>L2 磁盘缓存</td><td>ffmpeg 抽帧结果（视频 MD5 → 帧路径列表）</td><td>diskcache</td><td>永久</td><td>20 GB</td><td>帧文件删除时失效</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre><code>import hashlib
+import diskcache
+from functools import lru_cache
+
+# L2 磁盘缓存（永久有效，基于文件 MD5）
+description_cache = diskcache.Cache("./cache/descriptions", size_limit=int(10e9))
+asr_cache = diskcache.Cache("./cache/asr", size_limit=int(5e9))
+clap_cache = diskcache.Cache("./cache/clap", size_limit=int(2e9))
+frames_cache = diskcache.Cache("./cache/frames", size_limit=int(20e9))
+
+def file_md5(file_path: str) -> str:
+    """计算文件 MD5（用于缓存键）"""
+    h = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+async def analyze_with_cache(file_path: str, analyzer_func, cache, *args):
+    """带缓存的通用分析函数"""
+    md5 = file_md5(file_path)
+    cache_key = f"{md5}:{file_path}"
+
+    # 1. 检查 L2 磁盘缓存
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # 2. 执行分析
+    result = await analyzer_func(file_path, *args)
+
+    # 3. 写入缓存
+    cache.set(cache_key, result)
+
+    return result
+
+# L1 内存缓存（短期，高频查询）
+@lru_cache(maxsize=10000)
+def embed_text_cached(text: str) -> list[float]:
+    """文本 Embedding 内存缓存（1小时 TTL 通过定时清理实现）"""
+    return embedding_model.encode(text)</code></pre>
+
+<div class="card card-accent">
+  <h4>缓存失效场景</h4>
+  <ul>
+    <li><strong>文件修改</strong>：MD5 变化 → 自动 miss → 重新计算</li>
+    <li><strong>模型升级</strong>：缓存 key 加入模型版本号 <code>{md5}:{model_version}</code> → 新模型自动重算</li>
+    <li><strong>手动清除</strong>：API <code>DELETE /api/v1/cache?type=descriptions</code> 清除指定缓存</li>
+    <li><strong>磁盘空间不足</strong>：diskcache 自动 LRU 驱逐最旧条目</li>
+  </ul>
+</div>
+
+<div class="prev-next">
+  <a href="02-数据索引管线.html">← 上一篇：02 — 数据索引管线</a>
+  <a href="04-API设计与工程附录.html">下一篇：04 — API 设计与工程附录 →</a>
+</div>
+
+<footer>
+  <p>多模态向量推荐系统设计文档 · 03 向量数据库与推荐引擎 · 版本：2026-08-14</p>
+</footer>
+
+</div>
+
+<script src="_shared/js/mermaid.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#8B5CF6',
+    primaryTextColor: '#E8E8ED',
+    primaryBorderColor: '#8B5CF6',
+    lineColor: '#9CA3AF',
+    secondaryColor: '#18181D',
+    tertiaryColor: '#22222A',
+    fontFamily: '-apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif'
+  },
+  securityLevel: 'loose'
+});
+</script>
+
+</body>
+</html>

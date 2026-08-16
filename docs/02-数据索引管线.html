@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 — 数据索引管线</title>
+<link rel="stylesheet" href="_shared/css/style.css">
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="nav-inner">
+    <a href="00-系统总览设计.html" class="nav-brand">多模态推荐系统</a>
+    <div class="nav-links">
+      <a href="00-系统总览设计.html">00 总览</a>
+      <a href="01-模型选型与内存管理.html">01 模型</a>
+      <a href="02-数据索引管线.html" class="active">02 索引</a>
+      <a href="03-向量数据库与推荐引擎.html">03 检索</a>
+      <a href="04-API设计与工程附录.html">04 附录</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+
+<div class="cover">
+  <h1>数据索引管线</h1>
+  <div class="subtitle">02 — 图片/视频/音频三路索引 · 模块化架构 · ffmpeg · VAD · 标签体系</div>
+</div>
+
+<div class="toc">
+  <h3>本文档结构</h3>
+  <ol>
+    <li><a href="#s1">图片索引流程</a></li>
+    <li><a href="#s2">视频索引流程</a></li>
+    <li><a href="#s3">模块化架构</a></li>
+    <li><a href="#s4">音频索引流程</a></li>
+    <li><a href="#s5">抽帧策略详情</a></li>
+    <li><a href="#s6">标签生成系统</a></li>
+    <li><a href="#s7">ffmpeg 精确命令</a></li>
+    <li><a href="#s8">VAD 语音活动检测</a></li>
+  </ol>
+</div>
+
+<!-- 1. 图片索引流程 -->
+<h2 id="s1"><span class="num">01</span>图片索引流程</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    A[图片文件] --> B[VLM 分析<br>生成描述+标签]
+    A --> C[VL-Embedding<br>图像向量]
+    B --> D[文本 Embedding<br>描述向量]
+    C --> E[Qdrant 存储]
+    D --> E
+    B --> F[元数据存储<br>描述/标签/路径]
+    F --> E
+</pre>
+  <figcaption>图 1：图片索引流程 — 双路并行向量化</figcaption>
+</div>
+
+<!-- 2. 视频索引流程 -->
+<h2 id="s2"><span class="num">02</span>视频索引流程</h2>
+<p>视频包含<strong>画面轨道</strong>和<strong>声音轨道</strong>两条信息流。系统采用<strong>模块化设计</strong>：画面分析和声音分析是独立模块，业务层可自由组合。视频支持两种画面处理方案：</p>
+
+<h3>方案对比：直接传送 vs 抽帧</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>维度</th><th>方案 A：直接传送</th><th>方案 B：ffmpeg 抽帧</th></tr>
+</thead>
+<tbody>
+<tr><td>原理</td><td>视频文件直接传入模型 processor<br>模型内部自动抽帧</td><td>ffmpeg 先抽帧为图片序列<br>再将图片列表传入模型</td></tr>
+<tr><td>帧选择控制</td><td>模型自动决定（通常均匀采样）</td><td>完全可控（1fps / 关键帧 / 自定义）</td></tr>
+<tr><td>分辨率控制</td><td>模型内部缩放</td><td>可指定 720p / 1080p / 原图</td></tr>
+<tr><td>音频保留</td><td>部分实现保留（transformers）</td><td>不保留（需单独提取音轨）</td></tr>
+<tr><td>内存控制</td><td>不透明，由 processor 决定</td><td>精确可控（帧数 × 分辨率）</td></tr>
+<tr><td>实现复杂度</td><td>简单（一行代码）</td><td>中等（需 ffmpeg + 帧管理）</td></tr>
+<tr><td>调试能力</td><td>无法查看中间帧</td><td>可预览/调试每帧</td></tr>
+<tr><td>MLX 兼容性</td><td>mlx-vlm 有 bug（Qwen3-VL）</td><td>完全兼容（已验证）</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="card card-accent">
+  <h4>何时用直接传送？</h4>
+  <ul>
+    <li><strong>短视频（&lt; 30s）</strong>：帧数少，模型自动采样足够</li>
+    <li><strong>快速原型/调试</strong>：不需要精细控制，先跑通流程</li>
+    <li><strong>使用 transformers 后端</strong>：Qwen3-VL processor 原生支持视频路径</li>
+    <li><strong>不需要音轨分离</strong>：只关心画面内容</li>
+  </ul>
+</div>
+
+<div class="card" style="border-left: 3px solid var(--accent2);">
+  <h4>何时用 ffmpeg 抽帧？</h4>
+  <ul>
+    <li><strong>中长视频（&gt; 30s）</strong>：需要控制帧数避免内存溢出</li>
+    <li><strong>MLX 后端</strong>：mlx-vlm 的视频处理有 bug，必须手动抽帧</li>
+    <li><strong>需要音轨分离</strong>：同时提取音频走 ASR/CLAP（直接传送不分离音轨）</li>
+    <li><strong>需要关键帧检测</strong>：长视频只需场景切换帧</li>
+    <li><strong>需要精确分辨率控制</strong>：如 720p 降采样节省 vision tokens</li>
+    <li><strong>生产环境</strong>：可控、可调试、可优化</li>
+  </ul>
+</div>
+
+<div class="card" style="border-left: 3px solid var(--accent3);">
+  <h4>系统默认策略</h4>
+  <p>根据视频时长自动选择方案：</p>
+  <ul>
+    <li><strong>≤ 30s + transformers 后端</strong>：直接传送（简单快速）</li>
+    <li><strong>&gt; 30s 或 MLX 后端</strong>：ffmpeg 抽帧（可控安全）</li>
+    <li><strong>需要声音分析</strong>：必须抽帧方案（同时提取音轨）</li>
+    <li><strong>用户可强制指定</strong>：<code>video_method: "direct" | "frames" | "auto"</code></li>
+  </ul>
+</div>
+
+<!-- 3. 模块化架构 -->
+<h2 id="s3"><span class="num">03</span>模块化架构</h2>
+<p>画面分析和声音分析是<strong>完全独立的模块</strong>，各自输出标准化的向量和标签。业务层根据场景自由组合：</p>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+    subgraph MOD["独立分析模块（可单独调用）"]
+        direction TB
+
+        subgraph VMOD["画面分析模块"]
+            direction TB
+            VM_A{处理方案}
+            VM_A -->|直接传送| VM_B[模型 Processor<br>自动抽帧]
+            VM_A -->|ffmpeg 抽帧| VM_C[ffmpeg 抽帧<br>自适应策略]
+            VM_B --> VM_D[VLM 分析<br>描述+视觉标签]
+            VM_C --> VM_D
+            VM_D --> VM_E[VL-Embedding<br>画面向量]
+            VM_D --> VM_F[文本 Embedding<br>描述向量]
+        end
+
+        subgraph AMOD["声音分析模块"]
+            direction TB
+            AM_A[ffmpeg 提取音轨] --> AM_B{音频类型}
+            AM_B -->|语音| AM_C[ASR 转写]
+            AM_B -->|音乐/环境音| AM_D[CLAP 编码]
+            AM_B -->|混合| AM_C
+            AM_B -->|混合| AM_D
+            AM_C --> AM_E[转写文本]
+            AM_E --> AM_F[LLM 摘要+标签]
+            AM_F --> AM_G[文本 Embedding<br>语音向量]
+            AM_D --> AM_H[CLAP 音频向量]
+            AM_D --> AM_I[CLAP 标签分类]
+        end
+
+        subgraph IMOD["图片分析模块"]
+            direction TB
+            IM_A[VLM 分析<br>描述+标签] --> IM_B[VL-Embedding<br>图像向量]
+            IM_A --> IM_C[文本 Embedding<br>描述向量]
+        end
+
+        subgraph TMOD["文本分析模块"]
+            direction TB
+            TM_A[文本输入] --> TM_B[文本 Embedding<br>文本向量]
+        end
+    end
+
+    subgraph BIZ["业务组合层（自由编排）"]
+        direction LR
+        B1["视频推荐<br>= 画面模块 + 声音模块"]
+        B2["纯画面搜索<br>= 画面模块"]
+        B3["以音搜视频<br>= 声音模块 → 检索"]
+        B4["跨模态推荐<br>= 任意模块 → 统一检索"]
+    end
+
+    VMOD --> BIZ
+    AMOD --> BIZ
+    IMOD --> BIZ
+    TMOD --> BIZ
+
+    BIZ --> STORE[(Qdrant<br>统一向量存储)]
+
+    style VMOD fill:#1a1520,stroke:#8B5CF6
+    style AMOD fill:#0f1a1d,stroke:#06B6D4
+    style IMOD fill:#1a201a,stroke:#10B981
+    style TMOD fill:#1a1a20,stroke:#F59E0B
+    style BIZ fill:#1d1a25,stroke:#A78BFA
+</pre>
+  <figcaption>图 2：模块化架构 — 4 个独立分析模块 + 业务组合层自由编排</figcaption>
+</div>
+
+<div class="card card-accent">
+  <h4>模块化设计的核心优势</h4>
+  <ul>
+    <li><strong>独立调用</strong>：每个模块可单独使用，如只跑声音分析模块做 ASR 服务</li>
+    <li><strong>业务自由组合</strong>：视频推荐 = 画面 + 声音；以图搜视频 = 图片模块 → 检索视频向量</li>
+    <li><strong>独立优化</strong>：每个模块可单独缓存、批量处理、横向扩展</li>
+    <li><strong>独立部署</strong>：高频模块（如 VLM/Embedding）常驻，中频模块（如 LLM/Reranker）热缓存，低频模块（如 TTS）冷加载</li>
+    <li><strong>统一接口</strong>：所有模块输出 <code>{vector, description, tags}</code> 标准格式，业务层无需关心内部实现</li>
+  </ul>
+</div>
+
+<h3>模块标准接口</h3>
+<pre><code># 所有分析模块统一输出格式
+class AnalysisResult:
+    vectors: dict[str, list[float]]   # {"content_vector": [...], "audio_vector": [...]}
+    description: str                   # 富文本描述
+    tags: dict[str, list[str]]         # {"category": [...], "style": [...], ...}
+    metadata: dict                     # 模块特定元数据
+
+# 各模块接口
+class VisualModule:
+    async def analyze(file_path: str, method: str = "auto") -> AnalysisResult
+
+class AudioModule:
+    async def analyze(file_path: str) -> AnalysisResult
+
+class ImageModule:
+    async def analyze(file_path: str) -> AnalysisResult
+
+class TextModule:
+    async def analyze(text: str) -> AnalysisResult
+
+# 业务组合示例
+async def index_video(file_path: str, mode: str = "both"):
+    if mode in ("visual", "both"):
+        visual_result = await visual_module.analyze(file_path, method="auto")
+    if mode in ("audio", "both"):
+        audio_result = await audio_module.analyze(file_path)
+    # 合并结果，存入 Qdrant
+    return merge_results(visual_result, audio_result)</code></pre>
+
+<h3>视频分析模式选择策略</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>条件</th><th>画面方案</th><th>声音方案</th><th>原因</th></tr>
+</thead>
+<tbody>
+<tr><td>无声视频</td><td>抽帧 or 直接</td><td>跳过</td><td>无音轨</td></tr>
+<tr><td>纯音频（无画面）</td><td>跳过</td><td>ASR/CLAP</td><td>无画面</td></tr>
+<tr><td>短视频 ≤30s</td><td>直接传送</td><td>提取音轨</td><td>帧数少，直接更快</td></tr>
+<tr><td>中长视频 >30s</td><td>ffmpeg 抽帧</td><td>提取音轨</td><td>控制帧数，防内存溢出</td></tr>
+<tr><td>需要声音分析</td><td>ffmpeg 抽帧</td><td>提取音轨</td><td>同时提取音轨走 ASR/CLAP</td></tr>
+<tr><td>用户指定方案</td><td>用户选择</td><td>用户选择</td><td>强制覆盖自动判断</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- 4. 音频索引流程 -->
+<h2 id="s4"><span class="num">04</span>音频索引流程</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    A[音频文件] --> B{音频类型判断}
+    B -->|含语音| C[ASR 转写<br>Qwen3-ASR 0.6B]
+    B -->|音乐/环境音| D[CLAP 音频嵌入<br>laion/clap-htsat-unfused]
+    B -->|混合| C
+    B -->|混合| D
+
+    C --> E[转写文本]
+    E --> F[LLM 摘要<br>生成内容描述 + 标签]
+    F --> G[文本 Embedding<br>语音内容向量]
+    E --> G
+
+    D --> H[CLAP 音频向量<br>512维]
+    D --> I[CLAP 标签分类<br>音乐风格/环境音类型]
+
+    G --> J[Qdrant 存储]
+    H --> J
+    I --> J
+    A --> K[元数据<br>时长/格式/转写文本/音频类型]
+    K --> J
+</pre>
+  <figcaption>图 3：音频索引流程 — 双路处理（语音 ASR + 音乐/环境音 CLAP）</figcaption>
+</div>
+
+<div class="card card-accent">
+  <h4>音频类型自动判断策略</h4>
+  <p>系统通过能量分析 + 语音活动检测 (VAD) 自动判断音频类型：</p>
+  <ul>
+    <li><strong>语音占比 &gt; 70%</strong>：走 ASR 路径（播客、对话、演讲、有声书）</li>
+    <li><strong>语音占比 &lt; 30%</strong>：走 CLAP 路径（纯音乐、环境音、音效）</li>
+    <li><strong>混合内容</strong>：双路并行 — ASR 提取语音文本 + CLAP 提取音频特征（MV、带 BGM 的视频）</li>
+  </ul>
+  <p>CLAP 模型只有 0.15B 参数（~0.6GB），与 ASR 互斥加载，不会同时占用内存。</p>
+</div>
+
+<h3>CLAP 音频标签体系</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>标签类别</th><th>说明</th><th>示例</th></tr>
+</thead>
+<tbody>
+<tr><td>音频类型</td><td>音频大类分类</td><td>音乐、语音、环境音、音效</td></tr>
+<tr><td>音乐风格</td><td>CLAP 分类输出</td><td>流行、古典、电子、爵士、摇滚、民谣</td></tr>
+<tr><td>环境场景</td><td>AudioSet 风格分类</td><td>室内、户外、街道、自然、工厂、咖啡馆</td></tr>
+<tr><td>情绪氛围</td><td>音频情绪推断</td><td>欢快、悲伤、紧张、宁静、激昂</td></tr>
+<tr><td>乐器识别</td><td>CLAP 零样本分类</td><td>钢琴、吉他、鼓、小提琴、电子合成器</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- 5. 抽帧策略 -->
+<h2 id="s5"><span class="num">05</span>抽帧策略详情</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>视频时长</th><th>策略</th><th>帧数</th><th>分辨率</th><th>预估 Token</th><th>内存峰值</th></tr>
+</thead>
+<tbody>
+<tr><td>&lt; 30 秒</td><td>1 fps</td><td>~30 帧</td><td>720p</td><td>~27K</td><td>~12 GB</td></tr>
+<tr><td>30s - 5min</td><td>每 3 秒 1 帧</td><td>~30-100 帧</td><td>720p</td><td>~30-90K</td><td>~12-15 GB</td></tr>
+<tr><td>&gt; 5min</td><td>场景切换关键帧</td><td>~20-30 帧</td><td>720p</td><td>~18-27K</td><td>~10-12 GB</td></tr>
+<tr><td>超长 (&gt;30min)</td><td>分段处理 + 汇总</td><td>每段 20 帧</td><td>720p</td><td>分批处理</td><td>可控</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- 6. 标签生成系统 -->
+<h2 id="s6"><span class="num">06</span>标签生成系统</h2>
+
+<h3>多级标签体系</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>层级</th><th>字段</th><th>说明</th><th>生成方式</th><th>示例</th></tr>
+</thead>
+<tbody>
+<tr><td>L1</td><td>tags_category</td><td>内容大类</td><td>VLM 分类</td><td>美食、风景、人物、建筑、动物</td></tr>
+<tr><td>L2</td><td>tags_style</td><td>视觉风格</td><td>VLM 分析</td><td>ins风、胶片感、极简、赛博朋克</td></tr>
+<tr><td>L3</td><td>tags_emotion</td><td>情绪氛围</td><td>VLM + LLM</td><td>温馨、孤独、活力、宁静、神秘</td></tr>
+<tr><td>L4</td><td>tags_scene</td><td>场景环境</td><td>VLM 识别</td><td>室内、户外、车内、夜景、水下</td></tr>
+<tr><td>L5</td><td>tags_objects</td><td>具体物体</td><td>VLM 检测</td><td>汽车、手机、花卉、食物、宠物</td></tr>
+<tr><td>L6</td><td>color_palette</td><td>主色调</td><td>VLM 色彩分析</td><td>#4B3FE3, #06B6D4, #F59E0B</td></tr>
+<tr><td>L7</td><td>tags_audio</td><td>音频特征</td><td>CLAP 零样本分类</td><td>钢琴、古典、咖啡馆环境音、雨声</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>VLM 标签生成 Prompt</h3>
+<pre><code># 图片/视频标签生成 Prompt
+
+你是一位专业的内容分析师。请分析这张图片/视频帧，
+按以下 JSON 格式输出分析结果：
+
+{
+  "description": "一段 100-200 字的详细描述",
+  "tags_category": ["一级分类标签"],
+  "tags_style": ["视觉风格标签"],
+  "tags_emotion": ["情绪氛围标签"],
+  "tags_scene": ["场景环境标签"],
+  "tags_objects": ["检测到的物体"],
+  "color_palette": ["#hex1", "#hex2", "#hex3"],
+  "summary": "一句话总结"
+}
+
+要求：
+- 标签用中文，每个类别 2-5 个标签
+- 色彩用十六进制色值，取 3-5 个主色
+- 描述要包含构图、光线、色彩分析</code></pre>
+
+<h3>标签索引与过滤</h3>
+<p>Qdrant 的 Payload 支持标签过滤检索，可在向量相似度搜索的基础上叠加标签条件：</p>
+<pre><code># 带标签过滤的向量检索示例
+
+{
+  "vector": query_vector,
+  "filter": {
+    "must": [
+      {"key": "tags_category", "match": {"value": "美食"}},
+      {"key": "tags_style", "match": {"any": ["ins风", "暖色调"]}}
+    ],
+    "should": [
+      {"key": "tags_emotion", "match": {"value": "温馨"}}
+    ]
+  },
+  "limit": 100,
+  "with_payload": true
+}</code></pre>
+
+<!-- 7. ffmpeg 精确命令 -->
+<h2 id="s7"><span class="num">07</span>ffmpeg 精确命令</h2>
+
+<h3>视频抽帧命令</h3>
+<pre><code># 短视频 (< 60s) — 1fps 抽帧，720p 降采样
+ffmpeg -i input.mp4 \
+  -vf "fps=1,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" \
+  -q:v 2 \
+  frames/frame_%04d.jpg
+
+# 中视频 (60s-5min) — 每3秒1帧
+ffmpeg -i input.mp4 \
+  -vf "fps=1/3,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" \
+  -q:v 2 \
+  frames/frame_%04d.jpg
+
+# 长视频 (> 5min) — 关键帧检测（场景切换帧）
+ffmpeg -i input.mp4 \
+  -vf "select='gt(scene,0.4)',scale=1280:720" \
+  -vsync vfr \
+  -q:v 2 \
+  frames/frame_%04d.jpg
+
+# 视频首帧（缩略图）
+ffmpeg -i input.mp4 \
+  -vframes 1 \
+  -vf "scale=512:512:force_original_aspect_ratio=decrease" \
+  -q:v 2 \
+  thumbnail.jpg</code></pre>
+
+<h3>音轨提取命令</h3>
+<pre><code># 从视频提取完整音轨（WAV 16kHz 单声道，ASR 标准格式）
+ffmpeg -i input.mp4 \
+  -vn \
+  -acodec pcm_s16le \
+  -ar 16000 \
+  -ac 1 \
+  audio.wav
+
+# 从视频提取音轨（48kHz 立体声，CLAP 标准格式）
+ffmpeg -i input.mp4 \
+  -vn \
+  -acodec pcm_f32le \
+  -ar 48000 \
+  -ac 2 \
+  audio_clap.wav
+
+# 音频切片（长音频分段处理，每段 30s）
+ffmpeg -i input.wav \
+  -f segment \
+  -segment_time 30 \
+  -c copy \
+  segment_%03d.wav
+
+# 音频静音检测（用于判断是否需要 ASR）
+ffmpeg -i input.wav \
+  -af "silencedetect=noise=-30dB:d=2" \
+  -f null -</code></pre>
+
+<h3>分辨率选择策略</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>原始分辨率</th><th>目标分辨率</th><th>vision tokens/帧</th><th>说明</th></tr>
+</thead>
+<tbody>
+<tr><td>4K (3840×2160)</td><td>720p (1280×720)</td><td>~900</td><td>降采样 75%，质量损失可忽略</td></tr>
+<tr><td>1080p (1920×1080)</td><td>720p (1280×720)</td><td>~900</td><td>降采样 56%，推荐</td></tr>
+<tr><td>720p (1280×720)</td><td>保持原样</td><td>~900</td><td>无需缩放</td></tr>
+<tr><td>480p 及以下</td><td>保持原样</td><td>~400</td><td>低分辨率，tokens 更少</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- 8. VAD 语音活动检测 -->
+<h2 id="s8"><span class="num">08</span>VAD 语音活动检测</h2>
+<p>使用 <strong>Silero VAD</strong>（轻量级，~2MB，CPU 运行 &lt; 1ms/帧）进行语音检测，结合能量分析判断音频类型。</p>
+
+<pre><code>import torch
+from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+
+class AudioTypeDetector:
+    """音频类型检测器 — Silero VAD + 能量分析"""
+
+    def __init__(self):
+        self.vad_model = load_silero_vad()
+
+    def detect(self, audio_path: str) -> dict:
+        """检测音频类型，返回 {type, speech_ratio, segments}"""
+        # 1. Silero VAD 检测语音段
+        wav = read_audio(audio_path, sampling_rate=16000)
+        timestamps = get_speech_timestamps(
+            wav, self.vad_model,
+            threshold=0.5,         # 语音概率阈值
+            min_speech_duration_ms=250,
+            min_silence_duration_ms=500,
+        )
+
+        # 2. 计算语音占比
+        total_speech = sum(t["end"] - t["start"] for t in timestamps)
+        total_duration = len(wav)
+        speech_ratio = total_speech / total_duration
+
+        # 3. 能量分析 — 检测是否有持续环境音
+        energy = torch.abs(wav).float()
+        avg_energy = energy.mean().item()
+        energy_variance = energy.var().item()
+
+        # 4. 分类
+        if speech_ratio > 0.7:
+            audio_type = "speech"       # 播客、对话、演讲
+        elif speech_ratio < 0.3:
+            audio_type = "ambient"      # 纯音乐、环境音
+        else:
+            audio_type = "mixed"        # MV、带 BGM 的视频
+
+        return {
+            "type": audio_type,
+            "speech_ratio": speech_ratio,
+            "segments": timestamps,      # 语音时间段
+            "avg_energy": avg_energy,
+            "energy_variance": energy_variance,
+            "duration_s": total_duration / 16000,
+        }</code></pre>
+
+<div class="card card-accent">
+  <h4>音频路由决策表</h4>
+  <div class="table-wrap">
+  <table>
+  <thead>
+  <tr><th>speech_ratio</th><th>avg_energy</th><th>判定类型</th><th>路由</th></tr>
+  </thead>
+  <tbody>
+  <tr><td>> 0.7</td><td>—</td><td>speech</td><td>仅 ASR</td></tr>
+  <tr><td>< 0.3</td><td>—</td><td>ambient/music</td><td>仅 CLAP</td></tr>
+  <tr><td>0.3 - 0.7</td><td>—</td><td>mixed</td><td>ASR + CLAP 并行</td></tr>
+  <tr><td>任意</td><td>< 阈值</td><td>silent</td><td>跳过音频处理</td></tr>
+  </tbody>
+  </table>
+  </div>
+  <p>Silero VAD 仅占用 ~2MB 内存，可在常驻模型中运行，不影响内存预算。</p>
+</div>
+
+<div class="prev-next">
+  <a href="01-模型选型与内存管理.html">← 上一篇：01 — 模型选型与内存管理</a>
+  <a href="03-向量数据库与推荐引擎.html">下一篇：03 — 向量数据库与推荐引擎 →</a>
+</div>
+
+<footer>
+  <p>多模态向量推荐系统设计文档 · 02 数据索引管线 · 版本：2026-08-14</p>
+</footer>
+
+</div>
+
+<script src="_shared/js/mermaid.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#8B5CF6',
+    primaryTextColor: '#E8E8ED',
+    primaryBorderColor: '#8B5CF6',
+    lineColor: '#9CA3AF',
+    secondaryColor: '#18181D',
+    tertiaryColor: '#22222A',
+    fontFamily: '-apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif'
+  },
+  securityLevel: 'loose'
+});
+</script>
+
+</body>
+</html>

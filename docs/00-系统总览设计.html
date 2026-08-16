@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>00 — 系统总览设计</title>
+<link rel="stylesheet" href="_shared/css/style.css">
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="nav-inner">
+    <a href="00-系统总览设计.html" class="nav-brand">多模态推荐系统</a>
+    <div class="nav-links">
+      <a href="00-系统总览设计.html" class="active">00 总览</a>
+      <a href="01-模型选型与内存管理.html">01 模型</a>
+      <a href="02-数据索引管线.html">02 索引</a>
+      <a href="03-向量数据库与推荐引擎.html">03 检索</a>
+      <a href="04-API设计与工程附录.html">04 附录</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+
+<div class="cover">
+  <h1>多模态向量推荐系统</h1>
+  <div class="subtitle">00 — 系统总览设计</div>
+  <div class="meta">
+    <span>Apple M5 · 24GB Unified Memory</span>
+    <span>MLX 4-bit 量化</span>
+    <span>Qdrant 向量数据库</span>
+  </div>
+</div>
+
+<div class="toc">
+  <h3>本文档结构</h3>
+  <ol>
+    <li><a href="#s1">系统概览</a></li>
+    <li><a href="#s2">模型速览</a></li>
+    <li><a href="#s3">系统架构设计</a></li>
+    <li><a href="#s4">详细文档导航</a></li>
+  </ol>
+</div>
+
+<!-- 1. 系统概览 -->
+<h2 id="s1"><span class="num">01</span>系统概览</h2>
+
+<h3>目标</h3>
+<p>在单台 24GB MacBook Pro (M5) 上构建<strong>全模态内容推荐系统</strong>，支持对图片、视频、音频三种媒体类型进行自动理解、标签生成、向量化索引和相似推荐。</p>
+
+<h3>核心能力</h3>
+<div class="grid-3">
+  <div class="stat">
+    <div class="num">图片</div>
+    <div class="label">VLM 生成描述 + 标签<br>VL-Embedding 直接向量编码</div>
+  </div>
+  <div class="stat cyan">
+    <div class="num">视频</div>
+    <div class="label">三模式：仅画面 / 仅声音 / 画面+声音并行<br>双轨道独立向量化 + 融合检索</div>
+  </div>
+  <div class="stat green">
+    <div class="num">音频</div>
+    <div class="label">语音：ASR 转写 + 文本嵌入<br>音乐/环境音：CLAP 直接音频嵌入</div>
+  </div>
+</div>
+
+<h3>系统特点</h3>
+<ul>
+  <li><strong>模块化设计</strong>：画面、声音、图片、文本各自独立模块，统一接口输出 <code>{vector, description, tags}</code>，业务层自由组合</li>
+  <li><strong>视频双方案</strong>：直接传送（短视频/快速原型）与 ffmpeg 抽帧（长视频/生产环境）自动选择或手动指定</li>
+  <li><strong>双路向量化</strong>：VLM 理解路（生成富文本描述）+ VL-Embedding 快速路（直接图像向量），兼顾精度和速度</li>
+  <li><strong>视频双轨道分析</strong>：支持仅画面、仅声音、画面+声音并行三种模式，自动判断或用户指定，双轨道独立向量化后融合检索</li>
+  <li><strong>全音频覆盖</strong>：语音走 ASR 转写 + 文本嵌入；音乐/环境音走 CLAP 直接音频嵌入，两种路径统一到同一向量空间</li>
+  <li><strong>三阶段推荐</strong>：向量检索 Top-K → Reranker 精排 → LLM 生成推荐理由</li>
+  <li><strong>自动标签体系</strong>：VLM + LLM 协同生成多级标签（类别、风格、情绪、场景）；音频标签由 CLAP 分类 + ASR 内容提取</li>
+  <li><strong>全本地运行</strong>：无需云服务，数据隐私 100% 保障</li>
+  <li><strong>统一内存管理</strong>：三级加载策略（常驻/热缓存/冷加载），24GB 内存精细分配</li>
+</ul>
+
+<!-- 2. 模型速览 -->
+<h2 id="s2"><span class="num">02</span>模型速览</h2>
+<p>7 个模型协同工作，总内存占用控制在 24GB 以内。详细选型与内存管理策略见 <a href="01-模型选型与内存管理.html">01 — 模型选型与内存管理</a>。</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>角色</th><th>模型</th><th>参数量</th><th>内存</th><th>加载策略</th><th>状态</th></tr>
+</thead>
+<tbody>
+<tr><td>VLM 视觉理解</td><td>qwen3-vl-8b-instruct</td><td>8B</td><td>~5.4 GB</td><td>常驻</td><td><span class="tag tag-ok">已验证</span></td></tr>
+<tr><td>多模态 Embedding</td><td>qwen3-vl-embedding-2b</td><td>2B</td><td>~2.0 GB</td><td>常驻</td><td><span class="tag tag-ok">已下载</span></td></tr>
+<tr><td>ASR 语音识别</td><td>qwen3-asr-0.6b</td><td>0.6B</td><td>~0.7 GB</td><td>热缓存</td><td><span class="tag tag-ok">已下载</span></td></tr>
+<tr><td>音频嵌入/分类</td><td>CLAP (laion/clap-htsat-unfused)</td><td>0.15B</td><td>~0.6 GB</td><td>热缓存</td><td><span class="tag tag-ok">已下载</span></td></tr>
+<tr><td>TTS 语音合成</td><td>qwen3-tts-1.7b</td><td>1.7B</td><td>~2.4 GB</td><td>冷加载</td><td><span class="tag tag-ok">已下载</span></td></tr>
+<tr><td>LLM 重排/解释</td><td>bonsai-8b-mlx</td><td>8B</td><td>~1.3 GB</td><td>热缓存</td><td><span class="tag tag-ok">已下载</span></td></tr>
+<tr><td>跨模态 Reranker</td><td>qwen3-vl-reranker-2b</td><td>2B</td><td>~2.0 GB</td><td>热缓存</td><td><span class="tag tag-ok">已下载</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- 3. 系统架构设计 -->
+<h2 id="s3"><span class="num">03</span>系统架构设计</h2>
+
+<h3>三阶段推荐架构</h3>
+<p>系统采用业界最佳实践的 <strong>Retrieval-then-Rank</strong> 三阶段架构：</p>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+    subgraph S1["阶段一：离线索引"]
+        direction LR
+        IMG[图片] --> VLM[VLM 视觉理解]
+        VID[视频] --> VMODE{分析模式}
+        VMODE -->|画面| VFF[ffmpeg 抽帧] --> VLM
+        VMODE -->|声音| VAF[ffmpeg 提音轨] --> AUDT2{音频类型}
+        VMODE -->|画面+声音| VFF
+        VMODE -->|画面+声音| VAF
+        AUD[音频] --> AUDT{音频类型}
+        AUDT -->|语音| ASR[ASR 转写]
+        AUDT -->|音乐/环境音| CLAP[CLAP 音频嵌入]
+        AUDT2 -->|语音| ASR
+        AUDT2 -->|音乐/环境音| CLAP
+        TXT[文字] --> EMB
+        VLM --> DESC[富文本描述]
+        ASR --> DESC
+        DESC --> EMB[Embedding 向量化]
+        IMG --> VLE[VL-Embedding 直接编码]
+        VLE --> EMB
+        CLAP --> QD
+        EMB --> QD[(Qdrant 向量库)]
+    end
+
+    subgraph S2["阶段二：在线检索"]
+        direction LR
+        Q[查询输入] --> QV[查询向量化] --> SEARCH[向量检索 Top-K=100]
+        QD --> SEARCH
+        SEARCH --> CAND[候选集]
+    end
+
+    subgraph S3["阶段三：精排 + 解释"]
+        direction LR
+        CAND --> RR[Reranker 精排]
+        RR --> LLM[LLM 生成推荐理由]
+        LLM --> RESULT[Top-N 推荐结果]
+    end
+
+    S1 --> S2 --> S3
+</pre>
+  <figcaption>图 1：三阶段推荐系统架构</figcaption>
+</div>
+
+<h3>双路向量化设计</h3>
+<div class="grid-2">
+  <div class="card card-accent">
+    <h4>理解路 (VLM Path)</h4>
+    <p><strong>流程</strong>：媒体 → VLM → 富文本描述 → 文本 Embedding</p>
+    <p><strong>优势</strong>：深度理解，可生成标签和解释</p>
+    <p><strong>用途</strong>：入库时生成完整索引 + 查询时生成描述</p>
+    <p><strong>延时</strong>：~3-5s/图片，~10-30s/视频</p>
+  </div>
+  <div class="card" style="border-left: 3px solid var(--accent2);">
+    <h4>快速路 (VL-Embedding Path)</h4>
+    <p><strong>流程</strong>：图片 → VL-Embedding → 直接向量</p>
+    <p><strong>优势</strong>：快速，无需文本中间步骤</p>
+    <p><strong>用途</strong>：查询时快速图片检索 + 辅助索引</p>
+    <p><strong>延时</strong>：~0.3s/图片</p>
+  </div>
+</div>
+
+<h3>模型服务架构</h3>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    subgraph "Python 进程"
+        VLMC[VLM Controller<br>MLX 4-bit<br>:8081]
+        EMBC[Embedding Controller<br>transformers<br>:8082]
+        LLMC[LLM Controller<br>MLX 1-bit<br>:8083]
+        ASRC[ASR Controller<br>transformers<br>:8084]
+        RR[Reranker Controller<br>transformers<br>:8085]
+        CLAPC[CLAP Controller<br>transformers<br>:8086]
+    end
+
+    API[统一 API 网关<br>FastAPI :8000] --> VLMC
+    API --> EMBC
+    API --> LLMC
+    API --> ASRC
+    API --> RR
+    API --> CLAPC
+    API --> QD[(Qdrant<br>:6333)]
+
+    CLIENT[客户端] --> API
+</pre>
+  <figcaption>图 2：模型服务架构 — 统一 API 网关路由到各模型控制器</figcaption>
+</div>
+
+<!-- 4. 详细文档导航 -->
+<h2 id="s4"><span class="num">04</span>详细文档导航</h2>
+<p>本总览文档为入口，以下 4 个详细设计文档按领域拆分，可独立阅读：</p>
+
+<div class="doc-links">
+  <a href="01-模型选型与内存管理.html" class="doc-link">
+    <div class="dl-num">01</div>
+    <div class="dl-title">模型选型与内存管理</div>
+    <div class="dl-desc">7 个模型选型表、三级加载策略、内存分配预算、LRU 驱逐代码</div>
+  </a>
+  <a href="02-数据索引管线.html" class="doc-link">
+    <div class="dl-num">02</div>
+    <div class="dl-title">数据索引管线</div>
+    <div class="dl-desc">图片/视频/音频三路索引、模块化架构、ffmpeg 抽帧、VAD 检测、标签体系</div>
+  </a>
+  <a href="03-向量数据库与推荐引擎.html" class="doc-link">
+    <div class="dl-num">03</div>
+    <div class="dl-title">向量数据库与推荐引擎</div>
+    <div class="dl-desc">Qdrant Schema、MRL 维度截断、RRF 融合、Reranker 精排、LLM 推荐、缓存策略</div>
+  </a>
+  <a href="04-API设计与工程附录.html" class="doc-link">
+    <div class="dl-num">04</div>
+    <div class="dl-title">API 设计与工程附录</div>
+    <div class="dl-desc">REST API、性能优化、项目结构、实现路线图、错误处理、批量处理、渐进式索引</div>
+  </a>
+</div>
+
+<div class="prev-next">
+  <span></span>
+  <a href="01-模型选型与内存管理.html">下一篇：01 — 模型选型与内存管理 →</a>
+</div>
+
+<footer>
+  <p>多模态向量推荐系统设计文档 · 00 系统总览 · 版本：2026-08-14</p>
+</footer>
+
+</div>
+
+<script src="_shared/js/mermaid.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#8B5CF6',
+    primaryTextColor: '#E8E8ED',
+    primaryBorderColor: '#8B5CF6',
+    lineColor: '#9CA3AF',
+    secondaryColor: '#18181D',
+    tertiaryColor: '#22222A',
+    fontFamily: '-apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif'
+  },
+  securityLevel: 'loose'
+});
+</script>
+
+</body>
+</html>

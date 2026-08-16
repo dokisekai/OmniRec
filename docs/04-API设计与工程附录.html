@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 — API 设计与工程附录</title>
+<link rel="stylesheet" href="_shared/css/style.css">
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="nav-inner">
+    <a href="00-系统总览设计.html" class="nav-brand">多模态推荐系统</a>
+    <div class="nav-links">
+      <a href="00-系统总览设计.html">00 总览</a>
+      <a href="01-模型选型与内存管理.html">01 模型</a>
+      <a href="02-数据索引管线.html">02 索引</a>
+      <a href="03-向量数据库与推荐引擎.html">03 检索</a>
+      <a href="04-API设计与工程附录.html" class="active">04 附录</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+
+<div class="cover">
+  <h1>API 设计与工程附录</h1>
+  <div class="subtitle">04 — REST API · 项目结构 · 错误处理 · 批量索引 · 部署运维 · 评估指标 · 冷启动 · MMR 多样性</div>
+</div>
+
+<div class="toc">
+  <h3>本文档结构</h3>
+  <ol>
+    <li><a href="#s1">REST API 设计</a></li>
+    <li><a href="#s2">项目结构</a></li>
+    <li><a href="#s3">错误处理与容错</a></li>
+    <li><a href="#s4">批量处理与并发控制</a></li>
+    <li><a href="#s5">渐进式索引</a></li>
+    <li><a href="#s6">评估指标与反馈闭环</a></li>
+    <li><a href="#s7">冷启动策略</a></li>
+    <li><a href="#s8">MMR 多样性控制</a></li>
+    <li><a href="#s9">部署与运维</a></li>
+    <li><a href="#s10">实现路线图</a></li>
+  </ol>
+</div>
+
+<!-- 1. REST API 设计 -->
+<h2 id="s1"><span class="num">01</span>REST API 设计</h2>
+
+<h3>API 总览</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>方法</th><th>路径</th><th>功能</th><th>延时目标</th></tr>
+</thead>
+<tbody>
+<tr><td>POST</td><td><code>/api/v1/index</code></td><td>索引单个文件（同步）</td><td>2-15s</td></tr>
+<tr><td>POST</td><td><code>/api/v1/index/batch</code></td><td>批量索引（异步任务）</td><td>立即返回 task_id</td></tr>
+<tr><td>GET</td><td><code>/api/v1/index/status/{task_id}</code></td><td>查询批量索引进度</td><td><50ms</td></tr>
+<tr><td>POST</td><td><code>/api/v1/search</code></td><td>多模态搜索</td><td>3-8s</td></tr>
+<tr><td>POST</td><td><code>/api/v1/recommend</code></td><td>基于内容推荐</td><td>3-8s</td></tr>
+<tr><td>GET</td><td><code>/api/v1/items/{id}</code></td><td>获取条目元数据</td><td><50ms</td></tr>
+<tr><td>DELETE</td><td><code>/api/v1/items/{id}</code></td><td>删除条目</td><td><100ms</td></tr>
+<tr><td>GET</td><td><code>/api/v1/stats</code></td><td>系统状态统计</td><td><50ms</td></tr>
+<tr><td>DELETE</td><td><code>/api/v1/cache</code></td><td>清除缓存</td><td><200ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>搜索 API 详情</h3>
+<pre><code># POST /api/v1/search
+# Content-Type: multipart/form-data 或 application/json
+
+# 文字搜索
+{
+  "query_type": "text",
+  "query": "海边日落风景",
+  "filters": {
+    "media_type": ["image", "video"],
+    "tags_category": ["风景"],
+    "tags_emotion": ["宁静"]
+  },
+  "top_k": 10,
+  "rerank": true,
+  "explain": true
+}
+
+# 图片搜索（以图搜图）
+# multipart/form-data:
+#   file: <image binary>
+#   top_k: 10
+#   rerank: true
+#   filters: {"media_type": ["image"]}
+
+# 音频搜索
+# multipart/form-data:
+#   file: <audio binary>
+#   audio_mode: "auto"  // auto|speech|music
+#   top_k: 10
+
+# 响应
+{
+  "status": "ok",
+  "query": "海边日落风景",
+  "total": 10,
+  "results": [
+    {
+      "item_id": "a1b2c3d4-...",
+      "media_type": "image",
+      "score": 0.95,
+      "relevance_score": 0.92,
+      "description": "金色夕阳洒在海面上，波光粼粼...",
+      "tags": {
+        "category": ["风景", "自然"],
+        "style": ["暖色调", "广角"],
+        "emotion": ["宁静", "壮丽"]
+      },
+      "file_path": "/data/photos/sunset_001.jpg",
+      "thumbnail_url": "/api/v1/items/a1b2c3d4-.../thumbnail",
+      "reason": "与查询「海边日落」在画面内容和情绪氛围上高度匹配，暖色调和广角构图进一步增强了视觉一致性。"
+    }
+  ],
+  "latency_ms": {
+    "embedding": 45,
+    "retrieval": 12,
+    "rerank": 2300,
+    "llm_explain": 1500,
+    "total": 3857
+  }
+}</code></pre>
+
+<h3>索引 API 详情</h3>
+<pre><code># POST /api/v1/index
+# Content-Type: multipart/form-data
+# file: <binary>
+# media_type: "auto"  // auto|image|video|audio
+# video_mode: "auto"  // auto|visual|audio|both (仅视频)
+# force: false        // true 时忽略缓存重新索引
+
+# 响应
+{
+  "status": "ok",
+  "item_id": "a1b2c3d4-...",
+  "media_type": "video",
+  "video_mode": "both",
+  "processing": {
+    "frame_extraction": "12 frames extracted",
+    "vlm_description": "A scenic coastal landscape at sunset...",
+    "asr_transcript": "Welcome to this beautiful beach...",
+    "clap_embedding": "512-dim audio vector generated",
+    "tags": {
+      "category": ["风景", "旅行"],
+      "emotion": ["宁静", "壮丽"],
+      "audio": ["海浪声", "自然环境音"]
+    }
+  },
+  "cached": false,
+  "latency_ms": 8500
+}
+
+# POST /api/v1/index/batch — 批量索引
+{
+  "directory": "/data/media/",
+  "recursive": true,
+  "file_filter": ["*.jpg", "*.mp4", "*.wav"],
+  "video_mode": "auto",
+  "concurrency": 3
+}
+
+# 响应（立即返回）
+{
+  "status": "accepted",
+  "task_id": "batch-20260814-001",
+  "total_files": 1523,
+  "estimated_time_min": 45
+}</code></pre>
+
+<h3>推荐 API 详情（Item-to-Item）</h3>
+<p>推荐 API 与搜索 API 的核心区别：搜索需要实时计算查询向量，推荐则复用已存储的向量——客户端只需传 <code>item_id</code>，服务端自动从 Qdrant 取回向量并检索相似内容。</p>
+
+<pre><code># POST /api/v1/recommend
+# Content-Type: application/json
+# 基于已索引条目的 Item-to-Item 推荐
+
+# 请求
+{
+  "item_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "top_n": 10,
+  "filters": {                    # 可选：用标签缩小候选范围
+    "media_type": ["video", "image"],
+    "tags_category": ["风景"]
+  },
+  "mmr_lambda": 0.5,              # 可选：多样性参数 (0=最多样, 1=最相关)
+  "explain": true                 # 是否生成推荐理由
+}
+
+# 响应
+{
+  "status": "ok",
+  "source_item": {                # 源条目信息（客户端可展示）
+    "item_id": "a1b2c3d4-...",
+    "media_type": "video",
+    "description": "海边日落，金色光线洒在波浪上，远处有海鸥飞过...",
+    "tags": {
+      "category": ["风景", "旅行"],
+      "emotion": ["宁静", "壮丽"],
+      "audio": ["海浪声", "自然环境音"]
+    },
+    "thumbnail_url": "/api/v1/items/a1b2c3d4-.../thumbnail"
+  },
+  "recommendations": [
+    {
+      "item_id": "e5f6g7h8-...",
+      "media_type": "image",
+      "score": 0.93,
+      "relevance_score": 0.91,
+      "description": "夕阳下的湖泊，天空呈现橙红色渐变...",
+      "tags": {
+        "category": ["风景", "自然"],
+        "emotion": ["宁静", "壮丽"]
+      },
+      "thumbnail_url": "/api/v1/items/e5f6g7h8-.../thumbnail",
+      "reason": "同样是日落水景题材，暖色调和广角构图风格高度一致，情绪氛围匹配。"
+    }
+    // ... Top-10
+  ],
+  "latency_ms": {
+    "vector_retrieval": 8,        # 从 Qdrant 取回向量（极快）
+    "search": 12,                 # 向量检索 Top-100
+    "rerank": 2300,               # Reranker 精排
+    "mmr": 5,                     # MMR 重排
+    "llm_explain": 1500,          # LLM 推荐理由
+    "total": 3825
+  }
+}</code></pre>
+
+<div class="card card-accent">
+  <h4>搜索 API vs 推荐 API 对比</h4>
+  <div class="table-wrap" style="margin-top: 0.5rem;">
+  <table>
+  <thead>
+  <tr><th>维度</th><th><code>/api/v1/search</code></th><th><code>/api/v1/recommend</code></th></tr>
+  </thead>
+  <tbody>
+  <tr><td>输入</td><td>文字/图片/音频文件</td><td>已索引条目的 <code>item_id</code></td></tr>
+  <tr><td>查询向量来源</td><td>实时计算（VLM/ASR/CLAP/Embedding）</td><td>从 Qdrant 取回已存储向量</td></tr>
+  <tr><td>向量化延时</td><td>0.5-5s（取决于模态）</td><td>~8ms（仅 Qdrant 读取）</td></tr>
+  <tr><td>总延时</td><td>3-8s</td><td>2-5s</td></tr>
+  <tr><td>排除自身</td><td>不适用</td><td>自动排除 <code>item_id</code> 对应的条目</td></tr>
+  <tr><td>双向量融合</td><td>取决于查询模态</td><td>自动：源条目有 audio_vector 则两路检索 + RRF</td></tr>
+  </tbody>
+  </table>
+  </div>
+</div>
+
+<!-- 2. 项目结构 -->
+<h2 id="s2"><span class="num">02</span>项目结构</h2>
+<pre><code>multimodal-recommender/
+├── config/
+│   ├── config.yaml              # 主配置文件
+│   ├── model_paths.yaml         # 模型路径配置
+│   └── logging.yaml             # 日志配置
+│
+├── src/
+│   ├── api/
+│   │   ├── server.py            # FastAPI 应用入口
+│   │   ├── routes/
+│   │   │   ├── index.py         # 索引相关路由
+│   │   │   ├── search.py        # 搜索路由
+│   │   │   └── stats.py         # 统计路由
+│   │   └── middleware.py        # 中间件（日志/限流/CORS）
+│   │
+│   ├── models/
+│   │   ├── manager.py           # MemoryManager（三级内存管理）
+│   │   ├── vlm_wrapper.py       # Qwen3-VL 封装
+│   │   ├── embedding_wrapper.py # Qwen3-Embedding 封装
+│   │   ├── asr_wrapper.py       # Whisper 封装
+│   │   ├── clap_wrapper.py      # CLAP 音频嵌入封装
+│   │   ├── reranker_wrapper.py  # Reranker 封装
+│   │   └── llm_wrapper.py       # bonsai-8b 封装
+│   │
+│   ├── pipeline/
+│   │   ├── indexer.py           # 索引管线编排器
+│   │   ├── image_pipeline.py    # 图片索引流程
+│   │   ├── video_pipeline.py    # 视频索引流程
+│   │   ├── audio_pipeline.py    # 音频索引流程
+│   │   └── text_pipeline.py     # 文本索引流程
+│   │
+│   ├── retrieval/
+│   │   ├── qdrant_client.py     # Qdrant 连接与操作
+│   │   ├── searcher.py          # 向量检索器
+│   │   ├── fusion.py            # RRF 融合
+│   │   └── reranker.py          # 精排器
+│   │
+│   ├── recommend/
+│   │   ├── engine.py            # 推荐引擎（查询驱动）
+│   │   ├── item_recommender.py  # Item-to-Item 推荐（向量复用）
+│   │   ├── explainer.py         # LLM 推荐解释
+│   │   ├── diversity.py         # MMR 多样性控制
+│   │   └── feedback.py          # 反馈收集器
+│   │
+│   ├── cache/
+│   │   ├── memory_cache.py      # L1 内存缓存
+│   │   └── disk_cache.py        # L2 磁盘缓存
+│   │
+│   └── utils/
+│       ├── ffmpeg_tools.py      # ffmpeg 封装
+│       ├── file_utils.py        # 文件哈希/路径工具
+│       └── logger.py            # 日志工具
+│
+├── tests/
+│   ├── test_pipeline.py
+│   ├── test_retrieval.py
+│   └── test_api.py
+│
+├── scripts/
+│   ├── init_qdrant.py           # 初始化 Qdrant collection
+│   ├── batch_index.py           # 命令行批量索引
+│   └── evaluate.py              # 离线评估脚本
+│
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+└── README.md</code></pre>
+
+<!-- 3. 错误处理与容错 -->
+<h2 id="s3"><span class="num">03</span>错误处理与容错</h2>
+
+<h3>错误分级与处理策略</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>级别</th><th>场景</th><th>策略</th><th>HTTP 状态码</th></tr>
+</thead>
+<tbody>
+<tr><td><span class="tag tag-no">致命</span></td><td>模型加载失败 / Qdrant 连接断开</td><td>返回 503，记录告警</td><td>503</td></tr>
+<tr><td><span class="tag tag-warn">可恢复</span></td><td>VLM 分析超时 / ASR 失败</td><td>降级处理（跳过该模态），继续索引</td><td>200（部分结果）</td></tr>
+<tr><td><span class="tag tag-warn">可重试</span></td><td>网络抖动 / 临时 OOM</td><td>指数退避重试 3 次</td><td>504 → 自动重试</td></tr>
+<tr><td><span class="tag tag-ok">输入错误</span></td><td>文件格式不支持 / 参数缺失</td><td>返回 400 + 错误详情</td><td>400</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>降级策略</h3>
+<pre><code>class DegradationHandler:
+    """模态降级处理器 — 部分模态失败时保证基本可用"""
+
+    DEGRADATION_CHAIN = {
+        "video": {
+            "vlm_failed":      "skip_visual",    # VLM 挂了 → 跳过画面，仅索引声音
+            "asr_failed":      "skip_audio",     # ASR 挂了 → 跳过语音，仅索引画面
+            "clap_failed":     "skip_clap",      # CLAP 挂了 → 跳过音频嵌入
+            "all_visual_fail": "text_only",      # 画面全挂 → 仅用文件名 + 元数据
+        },
+        "audio": {
+            "asr_failed":      "clap_only",      # ASR 挂了 → 仅用 CLAP 嵌入
+            "clap_failed":     "asr_only",       # CLAP 挂了 → 仅用 ASR 文本
+            "all_fail":        "metadata_only",  # 全挂 → 仅用文件名
+        },
+        "search": {
+            "reranker_failed": "skip_rerank",    # Reranker 挂了 → 直接用向量检索结果
+            "llm_failed":      "skip_explain",   # LLM 挂了 → 返回无推荐理由的结果
+        }
+    }
+
+    async def handle_pipeline_error(
+        self, media_type: str, failed_component: str, context: dict
+    ) -> dict:
+        """根据失败组件选择降级路径"""
+        chain = self.DEGRADATION_CHAIN.get(media_type, {})
+        action = chain.get(failed_component)
+
+        if action is None:
+            raise PipelineError(f"无法降级：{media_type}.{failed_component}")
+
+        logger.warning(
+            f"降级触发: {media_type}/{failed_component} → {action}, "
+            f"file={context.get('file_path')}"
+        )
+
+        return {"degraded": True, "action": action, "original_error": failed_component}</code></pre>
+
+<h3>重试机制</h3>
+<pre><code>import asyncio
+import random
+from functools import wraps
+
+def retry_with_backoff(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exceptions: tuple = (TimeoutError, ConnectionError, OOMError),
+):
+    """指数退避 + 抖动重试装饰器"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except exceptions as e:
+                    if attempt == max_retries:
+                        raise
+                    delay = min(
+                        base_delay * (2 ** attempt) + random.uniform(0, 1),
+                        max_delay
+                    )
+                    logger.warning(
+                        f"重试 {attempt+1}/{max_retries}: {func.__name__}, "
+                        f"error={e}, delay={delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+        return wrapper
+    return decorator
+
+# 使用示例
+@retry_with_backoff(max_retries=3, base_delay=2.0)
+async def vlm_analyze(image_path: str) -> str:
+    """VLM 分析（自动重试）"""
+    return await vlm_model.chat(image_path, prompt=ANALYZE_PROMPT)</code></pre>
+
+<!-- 4. 批量处理与并发控制 -->
+<h2 id="s4"><span class="num">04</span>批量处理与并发控制</h2>
+
+<div class="card card-accent">
+  <h4>并发限制原则</h4>
+  <p>24GB 内存环境下，不同模态的处理内存占用差异巨大。通过信号量严格控制并发数，防止 OOM。</p>
+</div>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>处理类型</th><th>并发上限</th><th>内存峰值/任务</th><th>总内存预算</th><th>信号量</th></tr>
+</thead>
+<tbody>
+<tr><td>图片 VLM 分析</td><td>5</td><td>~1.5 GB</td><td>7.5 GB</td><td><code>Semaphore(5)</code></td></tr>
+<tr><td>音频 ASR 转写</td><td>3</td><td>~0.8 GB</td><td>2.4 GB</td><td><code>Semaphore(3)</code></td></tr>
+<tr><td>音频 CLAP 嵌入</td><td>3</td><td>~0.6 GB</td><td>1.8 GB</td><td><code>Semaphore(3)</code></td></tr>
+<tr><td>视频处理（抽帧+VLM）</td><td>1</td><td>~3.0 GB</td><td>3.0 GB</td><td><code>Semaphore(1)</code></td></tr>
+<tr><td>Embedding 向量化</td><td>10</td><td>~0.3 GB</td><td>3.0 GB</td><td><code>Semaphore(10)</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<pre><code>import asyncio
+from dataclasses import dataclass
+from typing import Callable, Any
+
+@dataclass
+class BatchProcessor:
+    """批量处理器 — 信号量限流 + 进度追踪"""
+
+    # 模态并发限制
+    SEMAPHORES = {
+        "image":    asyncio.Semaphore(5),
+        "audio":    asyncio.Semaphore(3),
+        "video":    asyncio.Semaphore(1),
+        "embedding": asyncio.Semaphore(10),
+    }
+
+    async def process_batch(
+        self,
+        files: list[dict],           # [{"path": "...", "type": "image", ...}, ...]
+        processor: Callable,          # 处理函数
+        progress_callback: Callable = None,
+    ) -> list[dict]:
+        """批量处理文件，按模态并发"""
+        total = len(files)
+        completed = 0
+        failed = 0
+        results = []
+
+        async def process_one(file_info: dict) -> dict:
+            nonlocal completed, failed
+            sem = self.SEMAPHORES.get(file_info["type"], asyncio.Semaphore(1))
+            try:
+                async with sem:
+                    result = await processor(file_info)
+                    completed += 1
+                    if progress_callback:
+                        await progress_callback(completed, total, failed)
+                    return {"status": "ok", "file": file_info["path"], "result": result}
+            except Exception as e:
+                failed += 1
+                logger.error(f"处理失败: {file_info['path']}, error={e}")
+                return {"status": "error", "file": file_info["path"], "error": str(e)}
+
+        tasks = [process_one(f) for f in files]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        return results
+
+# 批量索引示例
+processor = BatchProcessor()
+results = await processor.process_batch(
+    files=[
+        {"path": "/data/img1.jpg", "type": "image"},
+        {"path": "/data/vid1.mp4", "type": "video"},
+        {"path": "/data/audio1.wav", "type": "audio"},
+        # ...
+    ],
+    processor=index_single_file,
+    progress_callback=lambda done, total, fail: (
+        websocket.send_json({"done": done, "total": total, "failed": fail})
+    ),
+)</code></pre>
+
+<!-- 5. 渐进式索引 -->
+<h2 id="s5"><span class="num">05</span>渐进式索引</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    F[新文件] --> L1S["L1: 快速索引<br>文件名 + 元数据 + MD5<br>&lt;100ms"]
+    L1S --> QD[(Qdrant<br>可搜索)]
+    QD -.->|"后台触发"| L2S["L2: 标准索引<br>VLM 描述 + 标签 + Embedding<br>2-15s"]
+    L2S --> QD
+    QD -.->|"低优先级队列"| L3S["L3: 深度索引<br>ASR + CLAP + 多标签<br>10-60s"]
+    L3S --> QD
+
+    style L1S fill:#10B981,color:#000
+    style L2S fill:#F59E0B,color:#000
+    style L3S fill:#8B5CF6,color:#fff
+</pre>
+  <figcaption>图 1：渐进式索引三级流水线</figcaption>
+</div>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>层级</th><th>处理内容</th><th>延时</th><th>触发时机</th><th>可搜索</th></tr>
+</thead>
+<tbody>
+<tr><td><span class="tag tag-ok">L1 快速</span></td><td>文件名、文件类型、MD5、文件大小、分辨率</td><td>&lt;100ms</td><td>文件入库时立即执行</td><td>是（仅元数据匹配）</td></tr>
+<tr><td><span class="tag tag-warn">L2 标准</span></td><td>VLM 描述、内容标签、文本 Embedding 向量</td><td>2-15s</td><td>L1 完成后后台触发</td><td>是（语义检索）</td></tr>
+<tr><td><span class="tag tag-brand">L3 深度</span></td><td>ASR 转写、CLAP 音频向量、多维度标签</td><td>10-60s</td><td>系统空闲时低优先级处理</td><td>是（全模态检索）</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre><code>class ProgressiveIndexer:
+    """渐进式索引器 — L1→L2→L3 逐层加深"""
+
+    PRIORITY_QUEUE = asyncio.PriorityQueue()
+
+    async def index_l1(self, file_path: str) -> str:
+        """L1 快速索引 — 立即可搜索"""
+        item_id = str(uuid4())
+        metadata = extract_file_metadata(file_path)  # 文件名/大小/分辨率
+
+        await qdrant.upsert(
+            collection="media_items",
+            point_id=item_id,
+            vector={  # 占位向量，L2 替换
+                "content_vector": [0.0] * 2048,
+            },
+            payload={
+                "id": item_id,
+                "file_path": file_path,
+                "file_hash": file_md5(file_path),
+                "media_type": metadata["media_type"],
+                "file_size": metadata["file_size"],
+                "resolution": metadata.get("resolution"),
+                "index_level": 1,          # 标记索引深度
+                "created_at": datetime.now().isoformat(),
+            }
+        )
+
+        # 排队 L2 标准索引
+        await self.PRIORITY_QUEUE.put((2, item_id, file_path))
+        return item_id
+
+    async def index_l2(self, item_id: str, file_path: str):
+        """L2 标准索引 — VLM + Embedding"""
+        description = await vlm_analyze(file_path)
+        tags = extract_tags(description)
+        vector = await embedding_model.encode(description)
+
+        await qdrant.set_payload(
+            collection="media_items",
+            point_id=item_id,
+            payload={
+                "description": description,
+                "tags_category": tags["category"],
+                "tags_style": tags["style"],
+                "tags_emotion": tags["emotion"],
+                "index_level": 2,
+            }
+        )
+        await qdrant.update_vectors(
+            collection="media_items",
+            point_id=item_id,
+            vectors={"content_vector": vector},
+        )
+
+        # 视频/音频排队 L3 深度索引
+        media_type = get_media_type(file_path)
+        if media_type in ("video", "audio"):
+            await self.PRIORITY_QUEUE.put((3, item_id, file_path))
+
+    async def index_l3(self, item_id: str, file_path: str):
+        """L3 深度索引 — ASR + CLAP（仅音视频）"""
+        tasks = []
+
+        # ASR 转写
+        if has_audio_track(file_path):
+            tasks.append(self._do_asr(item_id, file_path))
+
+        # CLAP 音频嵌入
+        if has_audio_track(file_path):
+            tasks.append(self._do_clap(item_id, file_path))
+
+        await asyncio.gather(*tasks)
+
+        await qdrant.set_payload(
+            collection="media_items",
+            point_id=item_id,
+            payload={"index_level": 3}
+        )
+
+    async def run_worker(self):
+        """后台 worker — 按优先级处理 L2/L3 队列"""
+        while True:
+            priority, item_id, file_path = await self.PRIORITY_QUEUE.get()
+            try:
+                if priority == 2:
+                    await self.index_l2(item_id, file_path)
+                elif priority == 3:
+                    await self.index_l3(item_id, file_path)
+            except Exception as e:
+                logger.error(f"渐进索引失败 L{priority}: {item_id}, {e}")
+                # 失败重排队（降低优先级）
+                await self.PRIORITY_QUEUE.put((priority + 0.5, item_id, file_path))</code></pre>
+
+<!-- 6. 评估指标与反馈闭环 -->
+<h2 id="s6"><span class="num">06</span>评估指标与反馈闭环</h2>
+
+<h3>离线评估指标</h3>
+<div class="grid-2">
+  <div class="card card-accent">
+    <h4>检索质量</h4>
+    <ul>
+      <li><strong>Recall@K</strong>：Top-K 中命中相关条目的比例</li>
+      <li><strong>Precision@K</strong>：Top-K 中相关条目的占比</li>
+      <li><strong>MRR</strong>：第一个相关结果的平均倒数排名</li>
+      <li><strong>NDCG@K</strong>：考虑排名位置的增益（推荐主指标）</li>
+    </ul>
+  </div>
+  <div class="card" style="border-left: 3px solid var(--accent2);">
+    <h4>推荐质量</h4>
+    <ul>
+      <li><strong>Coverage</strong>：被推荐条目占总条目的比例</li>
+      <li><strong>Novelty</strong>：推荐长尾内容的能力</li>
+      <li><strong>Diversity</strong>：推荐列表内的多样性（ILS）</li>
+      <li><strong>Serpent</strong>：推荐列表的惊喜度</li>
+    </ul>
+  </div>
+</div>
+
+<h3>评估脚本</h3>
+<pre><code># scripts/evaluate.py
+
+import numpy as np
+from typing import list
+
+def recall_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
+    """Recall@K — Top-K 中命中的相关条目比例"""
+    top_k = retrieved[:k]
+    hits = len(set(top_k) & relevant)
+    return hits / len(relevant) if relevant else 0.0
+
+def ndcg_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
+    """NDCG@K — 归一化折损累积增益"""
+    dcg = 0.0
+    for i, item in enumerate(retrieved[:k]):
+        rel = 1.0 if item in relevant else 0.0
+        dcg += rel / np.log2(i + 2)
+
+    ideal_len = min(len(relevant), k)
+    idcg = sum(1.0 / np.log2(i + 2) for i in range(ideal_len))
+    return dcg / idcg if idcg > 0 else 0.0
+
+def intra_list_similarity(items: list[dict], vectors: dict[str, list[float]]) -> float:
+    """ILS — 推荐列表内平均余弦相似度（越低越多样）"""
+    vecs = [vectors[item["item_id"]] for item in items if item["item_id"] in vectors]
+    if len(vecs) < 2:
+        return 0.0
+    sims = []
+    for i in range(len(vecs)):
+        for j in range(i + 1, len(vecs)):
+            sim = cosine_similarity(vecs[i], vecs[j])
+            sims.append(sim)
+    return np.mean(sims)
+
+# 运行评估
+test_queries = load_test_set("./tests/eval_queries.json")
+results = []
+for query in test_queries:
+    retrieved = await search(query["input"], top_k=10)
+    retrieved_ids = [r["item_id"] for r in retrieved]
+    relevant = set(query["relevant_ids"])
+
+    results.append({
+        "query": query["input"],
+        "recall@10": recall_at_k(retrieved_ids, relevant, 10),
+        "ndcg@10": ndcg_at_k(retrieved_ids, relevant, 10),
+        "ils": intra_list_similarity(retrieved, all_vectors),
+    })
+
+# 汇总
+print(f"Recall@10:  {np.mean([r['recall@10'] for r in results]):.4f}")
+print(f"NDCG@10:    {np.mean([r['ndcg@10'] for r in results]):.4f}")
+print(f"ILS (多样性): {np.mean([r['ils'] for r in results]):.4f}")</code></pre>
+
+<h3>在线反馈闭环</h3>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    USER[用户] -->|查看推荐| REC[推荐结果]
+    REC -->|点击/收藏| FB["反馈收集<br>POST /api/v1/feedback"]
+    REC -->|忽略/跳过| FB
+    FB --> LOG[(反馈日志<br>SQLite)]
+    LOG -->|"每日/每周"| ANALYZE[反馈分析]
+    ANALYZE -->|调整权重| CONFIG[融合权重 / Reranker 阈值]
+    ANALYZE -->|发现负样本| HARD[难例挖掘]
+    HARD -->|补充评估集| EVAL[离线评估]
+    CONFIG --> REC
+
+    style FB fill:#10B981,color:#000
+    style ANALYZE fill:#F59E0B,color:#000
+</pre>
+  <figcaption>图 2：在线反馈闭环</figcaption>
+</div>
+
+<pre><code># 反馈 API
+# POST /api/v1/feedback
+{
+  "query_id": "q-20260814-001",
+  "item_id": "a1b2c3d4-...",
+  "action": "click",       // click|skip|like|dislike|save
+  "position": 1,           // 在推荐列表中的位置
+  "dwell_time_sec": 15     // 停留时间（可选）
+}
+
+# 反馈分析 — 每日 cron
+class FeedbackAnalyzer:
+    async def daily_report(self):
+        """每日反馈分析 → 权重微调建议"""
+        conn = sqlite3.connect("./data/feedback.db")
+        df = pd.read_sql("SELECT * FROM feedback WHERE date = today", conn)
+
+        # 1. 点击率（CTR）按位置
+        ctr_by_pos = df.groupby("position")["action"].apply(
+            lambda x: (x == "click").mean()
+        )
+
+        # 2. 跳过率高的查询
+        skip_rate = df.groupby("query_id")["action"].apply(
+            lambda x: (x == "skip").mean()
+        )
+        bad_queries = skip_rate[skip_rate > 0.7].index
+
+        # 3. 难例（用户 dislike 但系统高分推荐）
+        hard_negatives = df[
+            (df["action"] == "dislike") & (df["score"] > 0.8)
+        ]
+
+        return {
+            "avg_ctr": df["action"].eq("click").mean(),
+            "ctr_by_position": ctr_by_pos.to_dict(),
+            "bad_queries": list(bad_queries),
+            "hard_negatives": len(hard_negatives),
+            "suggestion": "位置 5-10 的 CTR 偏低，建议增加 MMR lambda 多样性"
+        }</code></pre>
+
+<!-- 7. 冷启动策略 -->
+<h2 id="s7"><span class="num">07</span>冷启动策略</h2>
+
+<div class="grid-3">
+  <div class="card card-accent">
+    <h4>新条目冷启动</h4>
+    <p><strong>问题</strong>：新入库内容无交互历史</p>
+    <p><strong>方案</strong>：渐进式索引 + 标签扩展</p>
+    <p>L1 元数据可搜 → L2 语义可搜 → L3 全模态可搜</p>
+    <p><strong>曝光 boost</strong>：新条目前 7 天给予 1.2× 分数加权</p>
+  </div>
+  <div class="card" style="border-left: 3px solid var(--accent2);">
+    <h4>新查询冷启动</h4>
+    <p><strong>问题</strong>：用户首次搜索无偏好数据</p>
+    <p><strong>方案</strong>：默认多样性偏好 + 通用标签引导</p>
+    <p>MMR lambda=0.5（多样性/相关性均衡）</p>
+    <p>展示热门标签引导用户细化查询</p>
+  </div>
+  <div class="card" style="border-left: 3px solid var(--accent3);">
+    <h4>空库冷启动</h4>
+    <p><strong>问题</strong>：系统初始化无任何数据</p>
+    <p><strong>方案</strong>：批量导入 + 后台渐进索引</p>
+    <p>L1 全量 → 搜索可用 → L2/L3 后台填充</p>
+    <p>进度看板：<code>GET /api/v1/stats</code></p>
+  </div>
+</div>
+
+<pre><code>class ColdStartHandler:
+    """冷启动处理器"""
+
+    # 新条目 boost 配置
+    NEW_ITEM_BOOST = {
+        "weight": 1.2,        # 分数加权
+        "decay_days": 7,      # 7 天线性衰减至 1.0
+    }
+
+    def apply_new_item_boost(
+        self, results: list[dict], items_meta: dict[str, dict]
+    ) -> list[dict]:
+        """对新条目（入库 <7 天）施加 boost"""
+        now = datetime.now()
+        for item in results:
+            meta = items_meta.get(item["item_id"])
+            if meta and "created_at" in meta:
+                age_days = (now - parse(meta["created_at"])).days
+                if age_days < self.NEW_ITEM_BOOST["decay_days"]:
+                    decay = 1 - (age_days / self.NEW_ITEM_BOOST["decay_days"])
+                    boost = 1 + (self.NEW_ITEM_BOOST["weight"] - 1) * decay
+                    item["score"] *= boost
+                    item["boosted"] = True
+
+        results.sort(key=lambda x: -x["score"])
+        return results</code></pre>
+
+<!-- 8. MMR 多样性控制 -->
+<h2 id="s8"><span class="num">08</span>MMR 多样性控制</h2>
+
+<p>Maximal Marginal Relevance (MMR) 算法在精排后对推荐列表去重和多样化，避免连续推荐高度相似的内容。</p>
+
+<div class="card card-accent">
+  <h4>MMR 核心公式</h4>
+  <p style="font-family: var(--font-mono); font-size: 0.9rem; text-align: center; padding: 0.5rem;">
+    MMR(d) = argmax<sub>d ∈ C\D</sub> [ λ · sim(d, q) − (1−λ) · max<sub>d' ∈ D</sub> sim(d, d') ]
+  </p>
+  <ul>
+    <li><strong>λ = 1.0</strong>：纯相关性排序（无多样性）</li>
+    <li><strong>λ = 0.5</strong>：相关性与多样性均衡（默认推荐）</li>
+    <li><strong>λ = 0.2</strong>：强调多样性（探索性推荐）</li>
+  </ul>
+</div>
+
+<pre><code>import numpy as np
+from typing import Sequence
+
+def maximal_marginal_relevance(
+    query_vector: np.ndarray,
+    candidate_vectors: np.ndarray,
+    candidate_ids: Sequence[str],
+    lambda_param: float = 0.5,
+    k: int = 10,
+) -> list[str]:
+    """
+    MMR 多样性重排
+
+    Args:
+        query_vector: 查询向量 (D,)
+        candidate_vectors: 候选向量矩阵 (N, D)
+        candidate_ids: 候选 ID 列表 (N,)
+        lambda_param: 相关性 vs 多样性权衡
+        k: 返回数量
+
+    Returns:
+        重排后的 item_id 列表
+    """
+    # 归一化
+    query_norm = query_vector / (np.linalg.norm(query_vector) + 1e-8)
+    cand_norm = candidate_vectors / (
+        np.linalg.norm(candidate_vectors, axis=1, keepdims=True) + 1e-8
+    )
+
+    # 查询-候选相似度
+    rel_scores = cand_norm @ query_norm  # (N,)
+
+    selected = []
+    selected_mask = np.zeros(len(candidate_ids), dtype=bool)
+
+    for _ in range(min(k, len(candidate_ids))):
+        best_idx = -1
+        best_score = -np.inf
+
+        for i in range(len(candidate_ids)):
+            if selected_mask[i]:
+                continue
+
+            # 相关性分数
+            relevance = rel_scores[i]
+
+            # 多样性惩罚：与已选中最相似的分数
+            if selected:
+                diversity = max(
+                    float(cand_norm[i] @ cand_norm[j]) for j in selected
+                )
+            else:
+                diversity = 0.0
+
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = i
+
+        if best_idx == -1:
+            break
+
+        selected.append(best_idx)
+        selected_mask[best_idx] = True
+
+    return [candidate_ids[i] for i in selected]
+
+
+# 在推荐引擎中的集成
+class RecommendationEngine:
+    async def recommend(self, query: dict, top_n: int = 10) -> list[dict]:
+        # 1. 向量检索 Top-100
+        candidates = await self.searcher.search(query, top_k=100)
+
+        # 2. Reranker 精排 → Top-20
+        reranked = await self.reranker.rerank(query, candidates, top_k=20)
+
+        # 3. MMR 多样性重排 → Top-N
+        candidate_vectors = np.array([c["vector"] for c in reranked])
+        candidate_ids = [c["item_id"] for c in reranked]
+        query_vec = np.array(query["vector"])
+
+        mmr_ids = maximal_marginal_relevance(
+            query_vector=query_vec,
+            candidate_vectors=candidate_vectors,
+            candidate_ids=candidate_ids,
+            lambda_param=query.get("mmr_lambda", 0.5),
+            k=top_n,
+        )
+
+        # 4. LLM 生成推荐理由
+        final = [c for c in reranked if c["item_id"] in mmr_ids]
+        final = await self.explainer.explain(query, final)
+
+        return final</code></pre>
+
+<!-- 9. 部署与运维 -->
+<h2 id="s9"><span class="num">09</span>部署与运维</h2>
+
+<h3>Docker Compose 部署</h3>
+<pre><code># docker-compose.yml
+version: "3.9"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+
+  recommender:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./cache:/app/cache
+      - ./models:/app/models
+      - ./config:/app/config
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - MODEL_DEVICE=mps        # Apple Metal
+      - MEMORY_LIMIT_GB=20
+    depends_on:
+      - qdrant
+    deploy:
+      resources:
+        limits:
+          memory: 22G
+
+volumes:
+  qdrant_data:</code></pre>
+
+<pre><code># Dockerfile
+FROM python:3.11-slim
+
+# 系统依赖（ffmpeg for frame extraction）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libsndfile1 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre>
+
+<h3>macOS launchd 本地部署</h3>
+<pre><code># &lt;?xml version="1.0" encoding="UTF-8"?&gt;
+# ~/Library/LaunchAgents/com.multimodal.recommender.plist
+
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+  &lt;key&gt;Label&lt;/key&gt;
+  &lt;string&gt;com.multimodal.recommender&lt;/string&gt;
+
+  &lt;key&gt;ProgramArguments&lt;/key&gt;
+  &lt;array&gt;
+    &lt;string&gt;/usr/bin/env&lt;/string&gt;
+    &lt;string&gt;python3&lt;/string&gt;
+    &lt;string&gt;/app/src/api/server.py&lt;/string&gt;
+  &lt;/array&gt;
+
+  &lt;key&gt;WorkingDirectory&lt;/key&gt;
+  &lt;string&gt;/app&lt;/string&gt;
+
+  &lt;key&gt;EnvironmentVariables&lt;/key&gt;
+  &lt;dict&gt;
+    &lt;key&gt;MODEL_DEVICE&lt;/key&gt;
+    &lt;string&gt;mps&lt;/string&gt;
+    &lt;key&gt;MEMORY_LIMIT_GB&lt;/key&gt;
+    &lt;string&gt;20&lt;/string&gt;
+  &lt;/dict&gt;
+
+  &lt;key&gt;RunAtLoad&lt;/key&gt;
+  &lt;true/&gt;
+  &lt;key&gt;KeepAlive&lt;/key&gt;
+  &lt;true/&gt;
+
+  &lt;key&gt;StandardOutPath&lt;/key&gt;
+  &lt;string&gt;/app/logs/stdout.log&lt;/string&gt;
+  &lt;key&gt;StandardErrorPath&lt;/key&gt;
+  &lt;string&gt;/app/logs/stderr.log&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+
+# 加载服务
+# launchctl load ~/Library/LaunchAgents/com.multimodal.recommender.plist</code></pre>
+
+<h3>监控指标</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>指标</th><th>采集方式</th><th>告警阈值</th><th>处理动作</th></tr>
+</thead>
+<tbody>
+<tr><td>内存使用率</td><td><code>psutil.virtual_memory()</code></td><td>&gt; 90%</td><td>驱逐热缓存模型 + 告警</td></tr>
+<tr><td>Qdrant 连接状态</td><td>心跳检测</td><td>连续 3 次失败</td><td>自动重连 + 降级到元数据搜索</td></tr>
+<tr><td>搜索 P95 延时</td><td>请求计时</td><td>&gt; 10s</td><td>跳过 LLM 解释 + 缩小 Reranker 候选</td></tr>
+<tr><td>索引队列积压</td><td>队列长度</td><td>&gt; 500</td><td>提升 worker 并发 + 告警</td></tr>
+<tr><td>磁盘缓存占用</td><td><code>diskcache.volume()</code></td><td>&gt; 35 GB</td><td>LRU 清理 + 告警</td></tr>
+<tr><td>模型加载失败率</td><td>异常计数</td><td>&gt; 5%/小时</td><td>检查模型文件 + 降级处理</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre><code># GET /api/v1/stats 响应
+{
+  "status": "ok",
+  "uptime_hours": 72.5,
+  "qdrant": {
+    "connected": true,
+    "total_points": 15234,
+    "indexed_points": 14890,
+    "pending_l2": 312,
+    "pending_l3": 89
+  },
+  "models": {
+    "vlm":       {"loaded": true,  "tier": "resident"},
+    "embedding": {"loaded": true,  "tier": "resident"},
+    "llm":       {"loaded": false, "tier": "warm_cache"},
+    "asr":       {"loaded": false, "tier": "warm_cache"},
+    "clap":      {"loaded": false, "tier": "warm_cache"},
+    "reranker":  {"loaded": false, "tier": "warm_cache"}
+  },
+  "memory": {
+    "used_gb": 7.4,
+    "limit_gb": 20.0,
+    "resident_gb": 7.4,
+    "warm_cache_gb": 0,
+    "cold_load_gb": 0
+  },
+  "cache": {
+    "l1_embedding": {"size": 3421, "hit_rate": 0.78},
+    "l1_search":    {"size": 156, "hit_rate": 0.12},
+    "l2_descriptions": {"size_gb": 4.2, "limit_gb": 10},
+    "l2_asr":          {"size_gb": 1.8, "limit_gb": 5},
+    "l2_clap":         {"size_gb": 0.3, "limit_gb": 2},
+    "l2_frames":       {"size_gb": 12.1, "limit_gb": 20}
+  },
+  "performance": {
+    "search_p50_ms": 3200,
+    "search_p95_ms": 5800,
+    "search_p99_ms": 8900,
+    "index_avg_ms": 4500,
+    "requests_today": 1247
+  }
+}</code></pre>
+
+<!-- 10. 实现路线图 -->
+<h2 id="s10"><span class="num">10</span>实现路线图</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+gantt
+    title 多模态推荐系统实现路线图
+    dateFormat YYYY-MM-DD
+    axisFormat %m/%d
+
+    section 第一阶段：基础架构
+    项目骨架 + Qdrant 部署         :p1a, 2026-08-15, 3d
+    MemoryManager 三级内存管理     :p1b, after p1a, 3d
+    VLM + Embedding 模型集成       :p1c, after p1a, 4d
+
+    section 第二阶段：索引管线
+    图片索引管线 (L1+L2)           :p2a, after p1c, 3d
+    视频索引管线 (抽帧+VLM)        :p2b, after p2a, 4d
+    音频索引管线 (ASR+CLAP)        :p2c, after p2a, 3d
+    渐进式索引 + 批量处理          :p2d, after p2b, 3d
+
+    section 第三阶段：检索推荐
+    向量检索 + RRF 融合            :p3a, after p2d, 2d
+    Reranker 精排                  :p3b, after p3a, 2d
+    LLM 推荐解释                   :p3c, after p3a, 3d
+    MMR 多样性 + 冷启动            :p3d, after p3c, 2d
+
+    section 第四阶段：工程化
+    REST API + 错误处理            :p4a, after p3d, 3d
+    缓存架构 + 降级策略            :p4b, after p4a, 2d
+    监控 + 评估脚本                :p4c, after p4b, 2d
+    Docker + launchd 部署          :p4d, after p4c, 2d
+</pre>
+  <figcaption>图 3：实现路线图（约 6 周）</figcaption>
+</div>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>阶段</th><th>周期</th><th>交付物</th><th>验收标准</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>一·基础架构</strong></td><td>第 1 周</td><td>项目骨架、Qdrant 部署、MemoryManager、VLM+Embedding 集成</td><td>单张图片可索引可搜索</td></tr>
+<tr><td><strong>二·索引管线</strong></td><td>第 2-3 周</td><td>图片/视频/音频全模态索引、渐进式索引、批量处理</td><td>100 文件批量索引成功</td></tr>
+<tr><td><strong>三·检索推荐</strong></td><td>第 4 周</td><td>向量检索、RRF 融合、Reranker、LLM 解释、MMR 多样性</td><td>搜索 P95 &lt; 8s，NDCG@10 &gt; 0.7</td></tr>
+<tr><td><strong>四·工程化</strong></td><td>第 5-6 周</td><td>REST API、缓存、降级、监控、评估、Docker 部署</td><td>Docker Compose 一键启动</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout warn">
+  <div class="callout-title">关键里程碑</div>
+  <p>第 1 周末：<strong>单图片索引+搜索</strong>跑通（证明核心链路可行）</p>
+  <p>第 3 周末：<strong>全模态批量索引</strong>完成（系统可用性初步验证）</p>
+  <p>第 4 周末：<strong>完整推荐链路</strong>跑通（含 Reranker + LLM 解释）</p>
+  <p>第 6 周末：<strong>生产级部署</strong>就绪（Docker + 监控 + 评估闭环）</p>
+</div>
+
+<div class="prev-next">
+  <a href="03-向量数据库与推荐引擎.html">← 上一篇：03 — 向量数据库与推荐引擎</a>
+  <a href="00-系统总览设计.html">回到总览 →</a>
+</div>
+
+<footer>
+  <p>多模态向量推荐系统设计文档 · 04 API 设计与工程附录 · 版本：2026-08-14</p>
+</footer>
+
+</div>
+
+<script src="_shared/js/mermaid.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#8B5CF6',
+    primaryTextColor: '#E8E8ED',
+    primaryBorderColor: '#8B5CF6',
+    lineColor: '#9CA3AF',
+    secondaryColor: '#18181D',
+    tertiaryColor: '#22222A',
+    fontFamily: '-apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif'
+  },
+  securityLevel: 'loose'
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,32 @@
+# Core Web & API Framework
+fastapi>=0.100.0
+uvicorn>=0.22.0
+pydantic>=2.0.0
+httpx>=0.24.0
+
+# Vector Database Client
+qdrant-client>=1.7.0
+
+# Machine Learning & AI Frameworks
+torch>=2.0.0
+transformers>=4.35.0
+numpy>=1.24.0
+librosa>=0.10.0
+
+# Image processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Disk caching
+diskcache>=5.6.0
+
+# Apple MLX (Optimized for Apple Silicon M-series)
+mlx>=0.5.0
+mlx-vlm>=0.1.0
+mlx-lm>=0.1.0
+
+# Embedding models (sentence-transformers preferred backend)
+sentence-transformers>=2.7.0
+
+# Audio (optional, for real Whisper ASR)
+# openai-whisper>=20231117

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 — 模型选型与内存管理</title>
+<link rel="stylesheet" href="_shared/css/style.css">
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="nav-inner">
+    <a href="00-系统总览设计.html" class="nav-brand">多模态推荐系统</a>
+    <div class="nav-links">
+      <a href="00-系统总览设计.html">00 总览</a>
+      <a href="01-模型选型与内存管理.html" class="active">01 模型</a>
+      <a href="02-数据索引管线.html">02 索引</a>
+      <a href="03-向量数据库与推荐引擎.html">03 检索</a>
+      <a href="04-API设计与工程附录.html">04 附录</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+
+<div class="cover">
+  <h1>模型选型与内存管理</h1>
+  <div class="subtitle">01 — 7 个模型协同 · 三级加载策略 · 24GB 精细分配</div>
+</div>
+
+<div class="toc">
+  <h3>本文档结构</h3>
+  <ol>
+    <li><a href="#s1">硬件规格</a></li>
+    <li><a href="#s2">模型选型表</a></li>
+    <li><a href="#s3">内存分配预算</a></li>
+    <li><a href="#s4">内存管理器实现</a></li>
+    <li><a href="#s5">并发控制</a></li>
+  </ol>
+</div>
+
+<!-- 1. 硬件规格 -->
+<h2 id="s1"><span class="num">01</span>硬件规格</h2>
+<div class="grid-3">
+  <div class="stat"><div class="num">M5</div><div class="label">Apple Silicon</div></div>
+  <div class="stat cyan"><div class="num">24GB</div><div class="label">统一内存</div></div>
+  <div class="stat green"><div class="num">~18GB</div><div class="label">可用于模型推理</div></div>
+</div>
+
+<!-- 2. 模型选型表 -->
+<h2 id="s2"><span class="num">02</span>模型选型表</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>角色</th>
+  <th>模型</th>
+  <th>参数量</th>
+  <th>量化</th>
+  <th>内存占用</th>
+  <th>加载策略</th>
+  <th>状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>VLM 视觉理解</td>
+  <td>qwen3-vl-8b-instruct</td>
+  <td>8B</td>
+  <td>MLX 4-bit</td>
+  <td>~5.4 GB</td>
+  <td>常驻</td>
+  <td><span class="tag tag-ok">已验证</span></td>
+</tr>
+<tr>
+  <td>多模态 Embedding</td>
+  <td>qwen3-vl-embedding-2b</td>
+  <td>2B</td>
+  <td>4-bit</td>
+  <td>~2.0 GB</td>
+  <td>常驻</td>
+  <td><span class="tag tag-ok">已下载</span></td>
+</tr>
+<tr>
+  <td>ASR 语音识别</td>
+  <td>qwen3-asr-0.6b</td>
+  <td>0.6B</td>
+  <td>4-bit</td>
+  <td>~0.7 GB</td>
+  <td>热缓存</td>
+  <td><span class="tag tag-ok">已下载</span></td>
+</tr>
+<tr>
+  <td>音频嵌入/分类</td>
+  <td>CLAP (laion/clap-htsat-unfused)</td>
+  <td>0.15B</td>
+  <td>FP16</td>
+  <td>~0.6 GB</td>
+  <td>热缓存</td>
+  <td><span class="tag tag-ok">已下载</span></td>
+</tr>
+<tr>
+  <td>TTS 语音合成</td>
+  <td>qwen3-tts-1.7b</td>
+  <td>1.7B</td>
+  <td>4-bit</td>
+  <td>~2.4 GB</td>
+  <td>冷加载</td>
+  <td><span class="tag tag-ok">已下载</span></td>
+</tr>
+<tr>
+  <td>LLM 重排/解释</td>
+  <td>bonsai-8b-mlx</td>
+  <td>8B</td>
+  <td>1-bit</td>
+  <td>~1.3 GB</td>
+  <td>热缓存</td>
+  <td><span class="tag tag-ok">已下载</span></td>
+</tr>
+<tr>
+  <td>跨模态 Reranker</td>
+  <td>qwen3-vl-reranker-2b</td>
+  <td>2B</td>
+  <td>4-bit</td>
+  <td>~2.0 GB</td>
+  <td>热缓存</td>
+  <td><span class="tag tag-ok">已下载</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- 3. 内存分配预算 -->
+<h2 id="s3"><span class="num">03</span>内存分配预算</h2>
+<div class="card card-accent">
+<p>24GB 统一内存的精细分配方案，确保常驻模型 + 系统开销在安全范围内：</p>
+</div>
+
+<figure class="chart-figure">
+  <figcaption>内存分配预算 (24GB Unified Memory)</figcaption>
+  <div id="chart-memory" style="width:100%;min-height:350px"></div>
+</figure>
+
+<div class="callout">
+  <div class="callout-title">内存管理策略（三级加载）</div>
+  <p><strong>常驻集</strong>（~7.4GB）：VLM (5.4G) + Embedding (2.0G) — 这两个模型在推荐流程中被高频调用，始终保持在内存中。</p>
+  <p><strong>热缓存</strong>（~4.6GB）：LLM (1.3G) + Reranker (2.0G) + ASR (0.7G) + CLAP (0.6G) — 仅在处理搜索、精排或音频输入时加载，5分钟无调用自动卸载。注意 ASR 和 CLAP 互斥加载（语音走 ASR，音乐/环境音走 CLAP），实际峰值仅 +4.0GB 而非 +4.6GB。</p>
+  <p><strong>冷加载</strong>（~2.4GB）：TTS (2.4G) — 仅语音合成时加载，用完即卸。</p>
+  <p><strong>系统 + 向量库</strong>（~3.5GB）：macOS + Qdrant + Python 运行时 + KV Cache。</p>
+  <p><strong>安全余量</strong>（~6.1GB）：防止峰值溢出。</p>
+</div>
+
+<div class="callout warn">
+  <div class="callout-title">注意：LM Studio 的限制</div>
+  <p>LM Studio 同时只能加载 <strong>1 个模型</strong>，且<strong>没有 Embeddings API 端点</strong>。因此所有模型通过 Python + MLX/transformers 直接加载，绕过 LM Studio。VLM 已验证可用 MLX 4-bit 运行，其他模型使用 transformers + MPS 后端。</p>
+</div>
+
+<!-- 4. 内存管理器实现 -->
+<h2 id="s4"><span class="num">04</span>内存管理器实现</h2>
+<p>内存管理器是系统稳定运行的核心。24GB 物理内存需要精确分配，避免 OOM 导致系统卡顿。</p>
+
+<h3>三层模型管理策略</h3>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>层级</th><th>模型</th><th>加载策略</th><th>卸载条件</th><th>内存占用</th></tr>
+</thead>
+<tbody>
+<tr><td>L0 常驻</td><td>VLM + Embedding</td><td>系统启动时加载，永不卸载</td><td>仅系统关闭时释放</td><td>7.4 GB</td></tr>
+<tr><td>L1 热缓存</td><td>LLM / ASR / CLAP / Reranker</td><td>首次调用时加载，保留 5 分钟</td><td>5 分钟无调用 → 卸载</td><td>1.3 / 0.7 / 0.6 / 2.0 GB</td></tr>
+<tr><td>L2 冷加载</td><td>TTS</td><td>每次调用时加载</td><td>调用完成立即卸载</td><td>2.4 GB</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>并发控制与 LRU 驱逐</h3>
+<pre><code>class MemoryManager:
+    """模型内存管理器 — LRU + 信号量并发控制"""
+
+    # 常驻模型（永不卸载）
+    RESIDENT = {"vlm", "embedding"}
+
+    # 热缓存模型（5分钟TTL）
+    WARM_CACHE = {"llm", "asr", "clap", "reranker"}
+    WARM_TTL = 300  # 秒
+
+    # 冷加载模型（用完即卸）
+    COLD_LOAD = {"tts"}
+
+    # 内存安全阈值
+    MEMORY_LIMIT_GB = 20.0  # 预留 4GB 给系统
+    MODEL_MEMORY = {
+        "vlm": 5.4, "embedding": 2.0, "llm": 1.3,
+        "asr": 0.7, "clap": 0.6, "reranker": 2.0, "tts": 2.4,
+    }
+
+    async def acquire(self, model_name: str) -> ModelHandle:
+        """获取模型句柄，必要时驱逐 LRU 模型"""
+        # 1. 常驻模型直接返回
+        if model_name in self.RESIDENT:
+            return self._get_handle(model_name)
+
+        # 2. 检查是否已在内存
+        if model_name in self._loaded:
+            self._touch(model_name)  # 更新 LRU 时间
+            return self._get_handle(model_name)
+
+        # 3. 需要加载 — 先检查内存预算
+        needed = self.MODEL_MEMORY[model_name]
+        while self._current_usage() + needed > self.MEMORY_LIMIT_GB:
+            victim = self._evict_lru()  # 驱逐最久未使用的非常驻模型
+            if victim is None:
+                raise MemoryError(f"无法加载 {model_name}，内存不足")
+
+        # 4. 加载模型
+        await self._load_model(model_name)
+        self._touch(model_name)
+        return self._get_handle(model_name)
+
+    def _evict_lru(self) -> str | None:
+        """LRU 驱逐：优先驱逐冷加载模型，再驱逐热缓存中最久的"""
+        # 跳过常驻模型和正在使用的模型
+        candidates = [m for m in self._loaded
+                      if m not in self.RESIDENT
+                      and m not in self._in_use]
+        if not candidates:
+            return None
+        # 按 last_access 时间排序，驱逐最久的
+        return min(candidates, key=lambda m: self._last_access[m])
+
+    async def release(self, model_name: str):
+        """释放模型引用（冷加载模型立即卸载）"""
+        if model_name in self.COLD_LOAD:
+            await self._unload_model(model_name)
+        # 热缓存模型保留，等待 TTL 过期或被 LRU 驱逐</code></pre>
+
+<!-- 5. 并发控制 -->
+<h2 id="s5"><span class="num">05</span>并发控制</h2>
+<div class="card card-accent">
+  <h4>并发请求处理</h4>
+  <ul>
+    <li><strong>信号量限制</strong>：每个模型一个 <code>asyncio.Semaphore</code>，VLM 并发上限 2（内存限制），Embedding 并发上限 8</li>
+    <li><strong>请求队列</strong>：超出并发上限的请求进入 FIFO 队列，超时 60s 自动拒绝</li>
+    <li><strong>模型切换锁</strong>：加载/卸载模型时持有写锁，推理时持有读锁，避免切换冲突</li>
+    <li><strong>ASR 与 CLAP 互斥</strong>：两者不同时需要（语音 vs 音乐），共享一个槽位，不会同时占用</li>
+  </ul>
+</div>
+
+<div class="prev-next">
+  <a href="00-系统总览设计.html">← 上一篇：00 — 系统总览设计</a>
+  <a href="02-数据索引管线.html">下一篇：02 — 数据索引管线 →</a>
+</div>
+
+<footer>
+  <p>多模态向量推荐系统设计文档 · 01 模型选型与内存管理 · 版本：2026-08-14</p>
+</footer>
+
+</div>
+
+<script src="_shared/js/echarts.min.js"></script>
+<script>
+(function() {
+  var style = getComputedStyle(document.documentElement);
+  var accent = style.getPropertyValue('--accent').trim();
+  var accent2 = style.getPropertyValue('--accent2').trim();
+  var accent3 = style.getPropertyValue('--accent3').trim();
+  var warn = style.getPropertyValue('--warn').trim();
+  var ink = style.getPropertyValue('--ink').trim();
+  var muted = style.getPropertyValue('--muted').trim();
+  var rule = style.getPropertyValue('--rule').trim();
+
+  var memChart = echarts.init(document.getElementById('chart-memory'), null, { renderer: 'svg' });
+  memChart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'item', appendToBody: true },
+    legend: { bottom: 10, textStyle: { color: muted, fontSize: 12 } },
+    series: [{
+      type: 'pie',
+      radius: ['40%', '70%'],
+      center: ['50%', '45%'],
+      label: {
+        color: ink,
+        fontSize: 12,
+        formatter: '{b}\n{c} GB ({d}%)'
+      },
+      labelLine: { lineStyle: { color: rule } },
+      data: [
+        { value: 5.4, name: 'VLM (qwen3-vl-8b)', itemStyle: { color: accent } },
+        { value: 1.3, name: 'LLM (bonsai-8b)', itemStyle: { color: accent2 } },
+        { value: 2.0, name: 'Embedding (2b)', itemStyle: { color: accent3 } },
+        { value: 0.7, name: 'ASR (0.6b)', itemStyle: { color: warn } },
+        { value: 0.6, name: 'CLAP (音频嵌入)', itemStyle: { color: '#F472B6' } },
+        { value: 2.4, name: 'TTS (1.7b)', itemStyle: { color: '#EF4444' } },
+        { value: 2.0, name: 'Reranker (2b)', itemStyle: { color: '#A78BFA' } },
+        { value: 3.5, name: '系统 + Qdrant', itemStyle: { color: '#6B7280' } },
+        { value: 6.1, name: '安全余量', itemStyle: { color: '#374151' } }
+      ]
+    }]
+  });
+  window.addEventListener('resize', function() { memChart.resize(); });
+})();
+</script>
+
+</body>
+</html>
