@@ -4,7 +4,7 @@ import {
   User, Palette, Mountain, Heart, Crop, Boxes, Image as ImageIcon, 
   Zap, Cpu, Disc, Video, Music, UploadCloud, Info, Copy, Check, Clock, Radio, 
   Sliders, Type, Terminal, Database, Trash2, Play, RefreshCw, Code2, ExternalLink,
-  BookOpen, Send, ChevronRight, CheckCircle2
+  BookOpen, Send, ChevronRight, CheckCircle2, ShieldAlert
 } from 'lucide-react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer } from 'recharts';
 
@@ -15,6 +15,48 @@ interface CategorizedTags {
   Emotion?: string[];
   Composition?: string[];
   Entity?: string[];
+}
+
+interface PersonDetails {
+  has_person?: boolean;
+  gender_age?: string;
+  posture_expression?: string;
+  hair_makeup?: string[];
+  jewelry_accessories?: string[];
+  apparel_top?: string[];
+  apparel_bottom?: string[];
+  footwear_bags?: string[];
+  style_aesthetics?: string[];
+  highlights_summary?: string;
+}
+
+interface ComplianceAuditData {
+  risk_level?: 'PASS' | 'REVIEW' | 'BLOCK' | string;
+  risk_score?: number;
+  issue_tags?: string[];
+  remediation_advice?: string[];
+  compliance_summary?: string;
+}
+
+interface FashionIndustryDetails {
+  has_fashion_analysis?: boolean;
+  garment_categories?: string[];
+  fabrics_textures?: string[];
+  silhouettes?: string[];
+  collars_sleeves?: string[];
+  patterns_crafts?: string[];
+  style_aesthetics?: string[];
+  fashion_summary?: string;
+}
+
+interface SocksDetails {
+  has_socks?: boolean;
+  socks_types?: string[];
+  colors_denier?: string[];
+  materials_weaves?: string[];
+  patterns_crafts?: string[];
+  pairing_styles?: string[];
+  socks_summary?: string;
 }
 
 interface IndexResultData {
@@ -29,6 +71,10 @@ interface IndexResultData {
   is_vectorized?: boolean;
   categorized_tags?: CategorizedTags;
   dominant_colors?: string[];
+  person_details?: PersonDetails;
+  fashion_details?: FashionIndustryDetails;
+  socks_details?: SocksDetails;
+  compliance_audit?: ComplianceAuditData;
 }
 
 interface RecommendationItem {
@@ -275,7 +321,7 @@ export function App() {
   };
 
   const detectMediaType = (filename: string, fileType?: string): 'image' | 'video' | 'audio' => {
-    if (fileType?.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(filename)) return 'video';
+    if (fileType?.startsWith('video/') || fileType === 'video/mp2t' || /\.(mp4|mov|avi|mkv|webm|ts|m2ts|flv|m4v)$/i.test(filename)) return 'video';
     if (fileType?.startsWith('audio/') || /\.(wav|mp3|m4a|aac|flac|ogg)$/i.test(filename)) return 'audio';
     return 'image';
   };
@@ -501,7 +547,11 @@ export function App() {
   };
 
   const dimensionOptions = [
-    { key: 'Subject', label: '主体与细节', icon: <User size={13} color="#6366f1" /> },
+    { key: 'Subject', label: '主体与人物', icon: <User size={13} color="#6366f1" /> },
+    { key: 'SocksHosiery', label: '🧦 袜品种类与颜色材质', icon: <Sparkles size={13} color="#38bdf8" /> },
+    { key: 'PersonFashion', label: '👤 穿搭首饰与人物解构', icon: <Sparkles size={13} color="#f472b6" /> },
+    { key: 'FashionIndustry', label: '👗 服装行业专业拆解', icon: <Sparkles size={13} color="#ec4899" /> },
+    { key: 'AdultContentAudit', label: '🛡️ 场景合规与适宜度审核', icon: <ShieldAlert size={13} color="#ef4444" /> },
     { key: 'ColorStyle', label: '重点色彩与光影', icon: <Palette size={13} color="#ec4899" /> },
     { key: 'Scene', label: '场景与空间', icon: <Mountain size={13} color="#10b981" /> },
     { key: 'Emotion', label: '情绪与意境', icon: <Heart size={13} color="#f59e0b" /> },
@@ -1448,6 +1498,377 @@ ws://localhost:8000/ws/progress`,
                               ))}
                             </div>
                           </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Deep Person & Fashion Breakdown Card */}
+                    {indexResult?.person_details && indexResult.person_details.has_person && (
+                      <div style={{ marginTop: '1.5rem', background: 'linear-gradient(135deg, rgba(236, 72, 153, 0.08) 0%, rgba(99, 102, 241, 0.08) 100%)', border: '1px solid rgba(236, 72, 153, 0.25)', borderRadius: 14, padding: '1.1rem 1.25rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem' }}>
+                          <div style={{ fontSize: '0.92rem', fontWeight: 700, color: '#f472b6', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Sparkles size={18} color="#ec4899" /> 👤 人物全貌与服饰首饰深度解构 (Person & Fashion Breakdown)
+                          </div>
+                          <span style={{ fontSize: '0.72rem', background: 'rgba(236, 72, 153, 0.2)', color: '#f472b6', padding: '0.15rem 0.5rem', borderRadius: 6, fontWeight: 600 }}>
+                            深度识别模式
+                          </span>
+                        </div>
+
+                        {indexResult.person_details.highlights_summary && (
+                          <div style={{ fontSize: '0.78rem', color: '#e5e7eb', background: 'rgba(0,0,0,0.3)', padding: '0.6rem 0.85rem', borderRadius: 8, marginBottom: '0.85rem', borderLeft: '3px solid #ec4899' }}>
+                            <strong>画像摘要:</strong> {indexResult.person_details.highlights_summary}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.85rem' }}>
+                          {/* 珠宝首饰 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fbbf24', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              💎 珠宝首饰与配饰:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {(indexResult.person_details.jewelry_accessories && indexResult.person_details.jewelry_accessories.length > 0) ? (
+                                indexResult.person_details.jewelry_accessories.map((j, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(251, 191, 36, 0.15)', color: '#fcd34d', border: '1px solid rgba(251, 191, 36, 0.3)' }}>{j}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>未检测到明显珠宝饰品</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 服装穿搭 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#a5b4fc', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              👗 服饰穿搭拆解:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {[...(indexResult.person_details.apparel_top || []), ...(indexResult.person_details.apparel_bottom || [])].length > 0 ? (
+                                [...(indexResult.person_details.apparel_top || []), ...(indexResult.person_details.apparel_bottom || [])].map((c, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(99, 102, 241, 0.15)', color: '#a5b4fc', border: '1px solid rgba(99, 102, 241, 0.3)' }}>{c}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>休闲日常着装</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 发型与妆容 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#f472b6', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              💇‍♀️ 发型妆容与神态:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {(indexResult.person_details.hair_makeup && indexResult.person_details.hair_makeup.length > 0) ? (
+                                indexResult.person_details.hair_makeup.map((h, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(236, 72, 153, 0.15)', color: '#f472b6', border: '1px solid rgba(236, 72, 153, 0.3)' }}>{h}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>自然发型与淡妆</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 风格流派与鞋包 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#34d399', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              🎨 风格美学与鞋包配饰:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {[...(indexResult.person_details.style_aesthetics || []), ...(indexResult.person_details.footwear_bags || [])].length > 0 ? (
+                                [...(indexResult.person_details.style_aesthetics || []), ...(indexResult.person_details.footwear_bags || [])].map((s, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(52, 211, 153, 0.15)', color: '#6ee7b7', border: '1px solid rgba(52, 211, 153, 0.3)' }}>{s}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>自然简约风</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Professional Fashion & Apparel Industry Card */}
+                    {indexResult?.fashion_details && indexResult.fashion_details.has_fashion_analysis && (
+                      <div style={{
+                        marginTop: '1.25rem',
+                        background: 'linear-gradient(135deg, rgba(236, 72, 153, 0.1) 0%, rgba(147, 51, 234, 0.08) 100%)',
+                        border: '1px solid rgba(236, 72, 153, 0.25)',
+                        borderRadius: 14,
+                        padding: '1.15rem 1.25rem',
+                        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem' }}>
+                          <div style={{ fontSize: '0.96rem', fontWeight: 700, color: '#f472b6', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Sparkles size={18} color="#f472b6" /> 👗 服装行业多维专业检测 (Fashion Industry Inspection)
+                          </div>
+                          <span style={{ fontSize: '0.72rem', color: '#c084fc', background: 'rgba(192, 132, 252, 0.15)', padding: '0.2rem 0.55rem', borderRadius: 6, border: '1px solid rgba(192, 132, 252, 0.3)' }}>
+                            面料·版型·领袖·工艺·风格
+                          </span>
+                        </div>
+
+                        {indexResult.fashion_details.fashion_summary && (
+                          <div style={{ fontSize: '0.8rem', color: '#f3e8ff', background: 'rgba(0, 0, 0, 0.25)', padding: '0.6rem 0.8rem', borderRadius: 8, marginBottom: '0.85rem', lineHeight: 1.45 }}>
+                            <strong>搭配与面料总评：</strong>{indexResult.fashion_details.fashion_summary}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.65rem' }}>
+                          {/* 面料材质与肌理 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#38bdf8', marginBottom: '0.4rem' }}>
+                              🧶 面料材质与织造肌理:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.fashion_details.fabrics_textures && indexResult.fashion_details.fabrics_textures.length > 0 ? (
+                                indexResult.fashion_details.fabrics_textures.map((fb, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(56, 189, 248, 0.15)', color: '#7dd3fc', border: '1px solid rgba(56, 189, 248, 0.3)' }}>{fb}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>常规面料</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 版型剪裁与廓形 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fbbf24', marginBottom: '0.4rem' }}>
+                              📐 版型剪裁与廓形线条:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.fashion_details.silhouettes && indexResult.fashion_details.silhouettes.length > 0 ? (
+                                indexResult.fashion_details.silhouettes.map((sl, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(251, 191, 36, 0.15)', color: '#fde047', border: '1px solid rgba(251, 191, 36, 0.3)' }}>{sl}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>常规版型</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 领型与袖型 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#a78bfa', marginBottom: '0.4rem' }}>
+                              👔 领型结构与袖型剪裁:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.fashion_details.collars_sleeves && indexResult.fashion_details.collars_sleeves.length > 0 ? (
+                                indexResult.fashion_details.collars_sleeves.map((cs, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(167, 139, 250, 0.15)', color: '#c4b5fd', border: '1px solid rgba(167, 139, 250, 0.3)' }}>{cs}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>标准领袖</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 印花图案与工艺辅料 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#f472b6', marginBottom: '0.4rem' }}>
+                              🎨 印花图案与细节辅料:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.fashion_details.patterns_crafts && indexResult.fashion_details.patterns_crafts.length > 0 ? (
+                                indexResult.fashion_details.patterns_crafts.map((pt, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(244, 114, 182, 0.15)', color: '#fbcfe8', border: '1px solid rgba(244, 114, 182, 0.3)' }}>{pt}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>素色工艺</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Specialized Hosiery & Socks Industry Card */}
+                    {indexResult?.socks_details && (indexResult.socks_details.has_socks || (indexResult.socks_details.socks_types && indexResult.socks_details.socks_types.length > 0)) && (
+                      <div style={{
+                        marginTop: '1.25rem',
+                        background: 'linear-gradient(135deg, rgba(14, 165, 233, 0.12) 0%, rgba(59, 130, 246, 0.08) 100%)',
+                        border: '1px solid rgba(56, 189, 248, 0.3)',
+                        borderRadius: 14,
+                        padding: '1.15rem 1.25rem',
+                        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem' }}>
+                          <div style={{ fontSize: '0.96rem', fontWeight: 700, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Sparkles size={18} color="#38bdf8" /> 🧦 袜业垂直多维专业检测 (Hosiery & Socks Inspection)
+                          </div>
+                          <span style={{ fontSize: '0.72rem', color: '#7dd3fc', background: 'rgba(56, 189, 248, 0.15)', padding: '0.2rem 0.55rem', borderRadius: 6, border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+                            品类·色彩·D数·材质·工艺
+                          </span>
+                        </div>
+
+                        {indexResult.socks_details.socks_summary && (
+                          <div style={{ fontSize: '0.8rem', color: '#e0f2fe', background: 'rgba(0, 0, 0, 0.25)', padding: '0.6rem 0.8rem', borderRadius: 8, marginBottom: '0.85rem', lineHeight: 1.45 }}>
+                            <strong>袜品档案总评：</strong>{indexResult.socks_details.socks_summary}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.65rem' }}>
+                          {/* 袜品种类与长度款式 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#38bdf8', marginBottom: '0.4rem' }}>
+                              🧦 袜品种类与长度款式:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.socks_details.socks_types && indexResult.socks_details.socks_types.length > 0 ? (
+                                indexResult.socks_details.socks_types.map((st, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(56, 189, 248, 0.15)', color: '#7dd3fc', border: '1px solid rgba(56, 189, 248, 0.3)' }}>{st}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>标准袜品</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 颜色体系与厚度D数 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fbbf24', marginBottom: '0.4rem' }}>
+                              🎨 颜色体系与厚度/D数:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.socks_details.colors_denier && indexResult.socks_details.colors_denier.length > 0 ? (
+                                indexResult.socks_details.colors_denier.map((cd, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(251, 191, 36, 0.15)', color: '#fde047', border: '1px solid rgba(251, 191, 36, 0.3)' }}>{cd}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>常规色系</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 材质成分与织造纹理 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#a78bfa', marginBottom: '0.4rem' }}>
+                              🧶 材质成分与织造工艺:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.socks_details.materials_weaves && indexResult.socks_details.materials_weaves.length > 0 ? (
+                                indexResult.socks_details.materials_weaves.map((mw, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(167, 139, 250, 0.15)', color: '#c4b5fd', border: '1px solid rgba(167, 139, 250, 0.3)' }}>{mw}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>纯棉罗纹</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 搭配鞋履与穿搭风格 */}
+                          <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: 10, padding: '0.75rem 0.85rem' }}>
+                            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#34d399', marginBottom: '0.4rem' }}>
+                              👟 鞋履搭配与穿搭风格:
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                              {indexResult.socks_details.pairing_styles && indexResult.socks_details.pairing_styles.length > 0 ? (
+                                indexResult.socks_details.pairing_styles.map((ps, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', borderRadius: 6, background: 'rgba(52, 211, 153, 0.15)', color: '#6ee7b7', border: '1px solid rgba(52, 211, 153, 0.3)' }}>{ps}</span>
+                                ))
+                              ) : (
+                                <span style={{ fontSize: '0.7rem', color: '#6b7280' }}>日常休闲搭</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Compliance, Appropriateness & Remediation Card */}
+                    {indexResult?.compliance_audit && (
+                      <div style={{
+                        marginTop: '1.25rem',
+                        background: indexResult.compliance_audit.risk_level === 'BLOCK'
+                          ? 'linear-gradient(135deg, rgba(239, 68, 68, 0.12) 0%, rgba(185, 28, 28, 0.08) 100%)'
+                          : indexResult.compliance_audit.risk_level === 'REVIEW'
+                          ? 'linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(217, 119, 6, 0.08) 100%)'
+                          : 'linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(5, 150, 105, 0.06) 100%)',
+                        border: `1px solid ${
+                          indexResult.compliance_audit.risk_level === 'BLOCK'
+                            ? 'rgba(239, 68, 68, 0.35)'
+                            : indexResult.compliance_audit.risk_level === 'REVIEW'
+                            ? 'rgba(245, 158, 11, 0.35)'
+                            : 'rgba(16, 185, 129, 0.3)'
+                        }`,
+                        borderRadius: 14,
+                        padding: '1.1rem 1.25rem'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                          <div style={{
+                            fontSize: '0.92rem',
+                            fontWeight: 700,
+                            color: indexResult.compliance_audit.risk_level === 'BLOCK'
+                              ? '#f87171'
+                              : indexResult.compliance_audit.risk_level === 'REVIEW'
+                              ? '#fbbf24'
+                              : '#34d399',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem'
+                          }}>
+                            <ShieldAlert size={18} /> 🛡️ 场景适宜度与合规整改诊断 (Content Compliance Audit)
+                          </div>
+                          <span style={{
+                            fontSize: '0.72rem',
+                            fontWeight: 700,
+                            padding: '0.2rem 0.6rem',
+                            borderRadius: 6,
+                            background: indexResult.compliance_audit.risk_level === 'BLOCK'
+                              ? 'rgba(239, 68, 68, 0.25)'
+                              : indexResult.compliance_audit.risk_level === 'REVIEW'
+                              ? 'rgba(245, 158, 11, 0.25)'
+                              : 'rgba(16, 185, 129, 0.2)',
+                            color: indexResult.compliance_audit.risk_level === 'BLOCK'
+                              ? '#fca5a5'
+                              : indexResult.compliance_audit.risk_level === 'REVIEW'
+                              ? '#fde68a'
+                              : '#a7f3d0'
+                          }}>
+                            {indexResult.compliance_audit.risk_level === 'BLOCK'
+                              ? '⚠️ 存在拦截风险'
+                              : indexResult.compliance_audit.risk_level === 'REVIEW'
+                              ? '💡 建议参考整改'
+                              : '✅ 画面健康合规'}
+                          </span>
+                        </div>
+
+                        {indexResult.compliance_audit.compliance_summary && (
+                          <div style={{ fontSize: '0.78rem', color: '#e5e7eb', marginBottom: '0.75rem', lineHeight: 1.45 }}>
+                            {indexResult.compliance_audit.compliance_summary}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                          {indexResult.compliance_audit.issue_tags && indexResult.compliance_audit.issue_tags.length > 0 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.72rem', color: '#9ca3af' }}>诊断标签:</span>
+                              {indexResult.compliance_audit.issue_tags.map((tag, idx) => (
+                                <span key={idx} style={{
+                                  fontSize: '0.7rem',
+                                  padding: '0.15rem 0.45rem',
+                                  borderRadius: 4,
+                                  background: 'rgba(255, 255, 255, 0.08)',
+                                  color: '#e5e7eb',
+                                  border: '1px solid rgba(255, 255, 255, 0.15)'
+                                }}>
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          {indexResult.compliance_audit.remediation_advice && indexResult.compliance_audit.remediation_advice.length > 0 && (
+                            <div style={{ background: 'rgba(0, 0, 0, 0.3)', borderRadius: 8, padding: '0.65rem 0.85rem', marginTop: '0.25rem' }}>
+                              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#fbbf24', marginBottom: '0.3rem' }}>
+                                🛠️ 精准整改指导建议:
+                              </div>
+                              <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.74rem', color: '#d1d5db', lineHeight: 1.5 }}>
+                                {indexResult.compliance_audit.remediation_advice.map((adv, idx) => (
+                                  <li key={idx}>{adv}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}

@@ -144,8 +144,12 @@ class CLAPWrapper(BaseModelWrapper):
                     data = data.astype(np.float32) / 32768.0
                     if len(data.shape) > 1:
                         data = data.mean(axis=1)
-                    audio = data
-                    sr = orig_sr
+                    if orig_sr != 48000:
+                        num_samples = int(len(data) * 48000 / orig_sr)
+                        audio = np.interp(np.linspace(0, len(data), num_samples), np.arange(len(data)), data)
+                    else:
+                        audio = data
+                    sr = 48000
 
             try:
                 inputs = self._processor(audio=audio, sampling_rate=sr, return_tensors="pt")
